@@ -60,6 +60,93 @@ class NJTransitAPI:
             print(f"❌ Error getting token: {e}")
             return None
     
+    def get_station_schedule(self, station_code: str) -> dict:
+        """
+        Get train schedule for a specific station
+        Returns trains grouped by direction (outbound/inbound)
+        """
+        
+        # If no credentials, fall back to mock
+        if not self.username or not self.password:
+            return self._mock_station_trains(station_code)
+        
+        # Get token
+        token = self.get_token()
+        if not token:
+            print("⚠️ Failed to get token, using mock data")
+            return self._mock_station_trains(station_code)
+        
+        # Get train schedule from NJ Transit API
+        url = f"{self.base_url}/getTrainSchedule"
+        files = {
+            'token': (None, token),
+            'station': (None, station_code)
+        }
+        
+        try:
+            response = requests.post(url, files=files)
+            response.raise_for_status()
+            result = response.json()
+            
+            # Parse and organize trains
+            return self._organize_trains(result)
+            
+        except Exception as e:
+            print(f"❌ Error getting station schedule: {e}")
+            return self._mock_station_trains(station_code)
+    
+    def _organize_trains(self, api_response: dict) -> dict:
+        """Organize API response into outbound/inbound trains"""
+        items = api_response.get('ITEMS', [])
+        
+        outbound = []
+        inbound = []
+        
+        for train in items:
+            train_id = train.get('TRAIN_ID')
+            destination = train.get('DESTINATION', '')
+            sched_time = train.get('SCHED_DEP_DATE', '')
+            
+            # Parse time from format: "20-Feb-2026 07:15:00 AM"
+            try:
+                dt = datetime.strptime(sched_time, '%d-%b-%Y %I:%M:%S %p')
+                time_str = dt.strftime('%I:%M %p')
+            except:
+                time_str = sched_time
+            
+            train_info = {
+                'id': train_id,
+                'time': time_str,
+                'destination': destination
+            }
+            
+            # Classify as outbound (to NY) or inbound (from NY)
+            # This is a simple heuristic - adjust based on your needs
+            if 'New York' in destination or 'NY Penn' in destination or 'PSNY' in destination:
+                outbound.append(train_info)
+            else:
+                inbound.append(train_info)
+        
+        return {
+            'outbound': outbound,
+            'inbound': inbound
+        }
+    
+    def _mock_station_trains(self, station_code: str) -> dict:
+        """Mock trains when API not available"""
+        return {
+            'outbound': [
+                {'id': '3817', 'time': '06:45 AM', 'destination': 'New York Penn'},
+                {'id': '3221', 'time': '07:15 AM', 'destination': 'New York Penn'},
+                {'id': '3225', 'time': '07:45 AM', 'destination': 'New York Penn'},
+            ],
+            'inbound': [
+                {'id': '3826', 'time': '05:15 PM', 'destination': station_code},
+                {'id': '3830', 'time': '05:45 PM', 'destination': station_code},
+                {'id': '5711', 'time': '06:15 PM', 'destination': station_code},
+            ]
+        }
+    
     def get_train_status(self, train_number: str) -> Dict:
         """
         Get train status from NJ Transit API
