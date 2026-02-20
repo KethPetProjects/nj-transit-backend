@@ -96,16 +96,23 @@ class NJTransitAPI:
             return self._mock_station_trains(station_code)
     
     def _organize_trains(self, api_response: dict) -> dict:
-        """Organize API response into outbound/inbound trains"""
+        """Organize API response into to-NYC (outbound) and from-NYC (inbound) trains"""
         items = api_response.get('ITEMS', [])
         
-        outbound = []
-        inbound = []
+        to_nyc = []      # Trains heading TO NYC/Newark (morning commute)
+        from_nyc = []    # Trains heading FROM NYC/Newark (evening commute)
+        
+        # Major destination hubs (these are where people work)
+        nyc_destinations = [
+            'New York', 'NY Penn', 'PSNY', 'Penn Station New York',
+            'Newark', 'Newark Penn', 'Hoboken', 'Jersey City', 'Secaucus'
+        ]
         
         for train in items:
             train_id = train.get('TRAIN_ID')
             destination = train.get('DESTINATION', '')
             sched_time = train.get('SCHED_DEP_DATE', '')
+            line = train.get('LINE', '')
             
             # Parse time from format: "20-Feb-2026 07:15:00 AM"
             try:
@@ -117,19 +124,21 @@ class NJTransitAPI:
             train_info = {
                 'id': train_id,
                 'time': time_str,
-                'destination': destination
+                'destination': destination,
+                'line': line
             }
             
-            # Classify as outbound (to NY) or inbound (from NY)
-            # This is a simple heuristic - adjust based on your needs
-            if 'New York' in destination or 'NY Penn' in destination or 'PSNY' in destination:
-                outbound.append(train_info)
+            # Classify: Is this train going TO NYC or FROM NYC?
+            is_to_nyc = any(hub in destination for hub in nyc_destinations)
+            
+            if is_to_nyc:
+                to_nyc.append(train_info)
             else:
-                inbound.append(train_info)
+                from_nyc.append(train_info)
         
         return {
-            'outbound': outbound,
-            'inbound': inbound
+            'outbound': to_nyc,    # To NYC (morning direction)
+            'inbound': from_nyc     # From NYC (evening direction)
         }
     
     def _mock_station_trains(self, station_code: str) -> dict:
