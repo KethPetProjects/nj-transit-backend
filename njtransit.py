@@ -62,8 +62,9 @@ class NJTransitAPI:
     
     def get_station_schedule(self, station_code: str) -> dict:
         """
-        Get train schedule for a specific station
-        Returns trains grouped by direction (outbound/inbound)
+        Get full day train schedule for a specific station
+        Uses getStationSchedule which returns 27 hours of schedule
+        Returns trains grouped by direction (to-NYC/from-NYC)
         """
         
         # If no credentials, fall back to mock
@@ -76,11 +77,13 @@ class NJTransitAPI:
             print("⚠️ Failed to get token, using mock data")
             return self._mock_station_trains(station_code)
         
-        # Get train schedule from NJ Transit API
-        url = f"{self.base_url}/getTrainSchedule"
+        # Get FULL DAY schedule from NJ Transit API
+        # This endpoint gives 27 hours of schedule (limit: 5 calls/day)
+        url = f"{self.base_url}/getStationSchedule"
         files = {
             'token': (None, token),
-            'station': (None, station_code)
+            'station': (None, station_code),
+            'NJTOnly': (None, 'true')  # Filter to NJ Transit trains only
         }
         
         try:
@@ -89,56 +92,70 @@ class NJTransitAPI:
             result = response.json()
             
             # Parse and organize trains
-            return self._organize_trains(result)
+            return self._organize_full_schedule(result, station_code)
             
         except Exception as e:
             print(f"❌ Error getting station schedule: {e}")
             return self._mock_station_trains(station_code)
     
-    def _organize_trains(self, api_response: dict) -> dict:
-        """Organize API response into to-NYC (outbound) and from-NYC (inbound) trains"""
-        items = api_response.get('ITEMS', [])
+    def _organize_full_schedule(self, api_response: list, station_code: str) -> dict:
+        """
+        Organize full day schedule into to-NYC and from-NYC trains
+        API returns list of stations, we need to find our station
+        """
+        to_nyc = []
+        from_nyc = []
         
-        to_nyc = []      # Trains heading TO NYC/Newark (morning commute)
-        from_nyc = []    # Trains heading FROM NYC/Newark (evening commute)
-        
-        # Major destination hubs (these are where people work)
+        # Major destination hubs (where people work)
         nyc_destinations = [
             'New York', 'NY Penn', 'PSNY', 'Penn Station New York',
             'Newark', 'Newark Penn', 'Hoboken', 'Jersey City', 'Secaucus'
         ]
         
-        for train in items:
-            train_id = train.get('TRAIN_ID')
-            destination = train.get('DESTINATION', '')
-            sched_time = train.get('SCHED_DEP_DATE', '')
-            line = train.get('LINE', '')
-            
-            # Parse time from format: "20-Feb-2026 07:15:00 AM"
-            try:
-                dt = datetime.strptime(sched_time, '%d-%b-%Y %I:%M:%S %p')
-                time_str = dt.strftime('%I:%M %p')
-            except:
-                time_str = sched_time
-            
-            train_info = {
-                'id': train_id,
-                'time': time_str,
-                'destination': destination,
-                'line': line
-            }
-            
-            # Classify: Is this train going TO NYC or FROM NYC?
-            is_to_nyc = any(hub in destination for hub in nyc_destinations)
-            
-            if is_to_nyc:
-                to_nyc.append(train_info)
-            else:
-                from_nyc.append(train_info)
+        # Find our station in the response
+        for station_data in api_response:
+            if station_data.get('STATION_2CHAR') == station_code:
+                items = station_data.get('ITEMS', [])
+                
+                for train in items:
+                    train_id = train.get('TRAIN_ID')
+                    destination = train.get('DESTINATION', '')
+                    sched_time = train.get('SCHED_DEP_DATE', '')
+                    line = train.get('LINE', '')
+                    
+                    # Skip if no train ID
+                    if not train_id:
+                        continue
+                    
+                    # Parse time
+                    try:
+                        dt = datetime.strptime(sched_time, '%d-%b-%Y %I:%M:%S %p')
+                        time_str = dt.strftime('%I:%M %p')
+                        hour = dt.hour
+                    except:
+                        time_str = sched_time
+                        hour = 0
+                    
+                    train_info = {
+                        'id': train_id,
+                        'time': time_str,
+                        'destination': destination,
+                        'line': line
+                    }
+                    
+                    # Classify: Is this train going TO NYC or FROM NYC?
+                    is_to_nyc = any(hub in destination for hub in nyc_destinations)
+                    
+                    if is_to_nyc:
+                        to_nyc.append(train_info)
+                    else:
+                        from_nyc.append(train_info)
+                
+                break  # Found our station, no need to continue
         
         return {
-            'outbound': to_nyc,    # To NYC (morning direction)
-            'inbound': from_nyc     # From NYC (evening direction)
+            'outbound': to_nyc,     # To NYC
+            'inbound': from_nyc     # From NYC
         }
     
     def _mock_station_trains(self, station_code: str) -> dict:
