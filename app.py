@@ -164,6 +164,15 @@ def get_trains():
         "evening": nj_transit.get_available_trains('inbound')
     }
 
+@app.get("/trains/{station_code}")
+def get_station_trains(station_code: str):
+    """Get real trains for a specific station from NJ Transit API"""
+    try:
+        trains_data = nj_transit.get_station_schedule(station_code)
+        return trains_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/stats")
 def get_stats():
     """Get service statistics"""
