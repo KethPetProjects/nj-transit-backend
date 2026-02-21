@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 import uvicorn
 
 from database import (
@@ -181,6 +182,55 @@ def get_stats():
         "total_subscribers": len(active_subs),
         "active_subscriptions": len(active_subs)
     }
+
+# ========== ADMIN ENDPOINTS ==========
+
+@app.get("/admin/subscriptions")
+def admin_list_subscriptions():
+    """
+    Admin: List all subscriptions
+    Returns all subscriptions with their details
+    """
+    try:
+        subs = get_active_subscriptions()
+        return {
+            "total": len(subs),
+            "subscriptions": subs
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/admin/subscription/{phone}")
+def admin_delete_subscription(phone: str):
+    """
+    Admin: Delete a specific subscription
+    """
+    try:
+        deleted = delete_subscription(phone)
+        if deleted:
+            return {"status": "deleted", "phone": phone}
+        else:
+            raise HTTPException(status_code=404, detail="Subscription not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/admin/export")
+def admin_export_data():
+    """
+    Admin: Export all subscription data as JSON
+    Use this to backup before container restarts
+    """
+    try:
+        subs = get_active_subscriptions()
+        return {
+            "export_date": datetime.now().isoformat(),
+            "total_subscriptions": len(subs),
+            "data": subs
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# =====================================
 
 if __name__ == "__main__":
     print("\n🚀 Starting NJ Transit Delay Alerts API Server...")
