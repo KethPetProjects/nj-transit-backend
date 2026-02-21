@@ -2,12 +2,15 @@
 FastAPI Web Server for NJ Transit Delay Alerts
 Handles subscription, verification, and unsubscribe
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 import uvicorn
+import secrets
+import os
 
 from database import (
     save_subscription, 
@@ -33,6 +36,34 @@ app.add_middleware(
 # Initialize services
 sms_service = SMSService()
 nj_transit = NJTransitAPI()
+
+# HTTP Basic Auth for admin endpoints
+security = HTTPBasic()
+
+def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
+    """Verify admin credentials"""
+    # Get admin credentials from environment variables
+    correct_username = os.getenv('ADMIN_USERNAME', 'admin')
+    correct_password = os.getenv('ADMIN_PASSWORD', 'changeme123')
+    
+    # Constant-time comparison to prevent timing attacks
+    is_username_correct = secrets.compare_digest(
+        credentials.username.encode("utf8"),
+        correct_username.encode("utf8")
+    )
+    is_password_correct = secrets.compare_digest(
+        credentials.password.encode("utf8"),
+        correct_password.encode("utf8")
+    )
+    
+    if not (is_username_correct and is_password_correct):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    
+    return credentials.username
 
 # Request models
 class SubscribeRequest(BaseModel):
@@ -183,41 +214,42 @@ def get_stats():
         "active_subscriptions": len(active_subs)
     }
 
-# ========== ADMIN ENDPOINTS ==========
+# ========== ADMIN ENDPOINTS (Protected) ==========
 
 @app.get("/admin/subscriptions")
-def admin_list_subscriptions():
+def admin_list_subscriptions(username: str = Depends(verify_admin)):
     """
-    Admin: List all subscriptions
+    Admin: List all subscriptions (Requires authentication)
     Returns all subscriptions with their details
     """
     try:
         subs = get_active_subscriptions()
         return {
             "total": len(subs),
-            "subscriptions": subs
+            "subscriptions": subs,
+            "authenticated_as": username
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/admin/subscription/{phone}")
-def admin_delete_subscription(phone: str):
+def admin_delete_subscription(phone: str, username: str = Depends(verify_admin)):
     """
-    Admin: Delete a specific subscription
+    Admin: Delete a specific subscription (Requires authentication)
     """
     try:
         deleted = delete_subscription(phone)
         if deleted:
-            return {"status": "deleted", "phone": phone}
+            return {"status": "deleted", "phone": phone, "deleted_by": username}
         else:
             raise HTTPException(status_code=404, detail="Subscription not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/admin/export")
-def admin_export_data():
+def admin_export_data(username: str = Depends(verify_admin)):
     """
-    Admin: Export all subscription data as JSON
+    Admin: Export all subscription data as JSON (Requires authentication)
     Use this to backup before container restarts
     """
     try:
@@ -225,12 +257,13 @@ def admin_export_data():
         return {
             "export_date": datetime.now().isoformat(),
             "total_subscriptions": len(subs),
-            "data": subs
+            "data": subs,
+            "exported_by": username
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# =====================================
+# ================================================
 
 if __name__ == "__main__":
     print("\n🚀 Starting NJ Transit Delay Alerts API Server...")
