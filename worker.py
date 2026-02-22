@@ -87,6 +87,12 @@ def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bo
     # Send on-time alert (30 min before departure)
     elif status['on_time'] and send_ontime:
         scheduled = status['scheduled_departure']
+        
+        # Check if scheduled time is available
+        if scheduled is None:
+            print(f"   ⚠️  Train {train_number} has no scheduled time")
+            return
+        
         minutes_until = (scheduled - datetime.now()).total_seconds() / 60
         
         # Send alert if train departs in 25-35 minutes (catches the 30-min window)
