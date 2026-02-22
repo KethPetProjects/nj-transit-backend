@@ -1,37 +1,50 @@
 """
 Database module for managing train alert subscriptions
-Uses SQLite for simplicity
+Uses PostgreSQL (Supabase) for persistent storage
 """
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import random
+import os
 from datetime import datetime
 from typing import Optional, List, Dict
 
-DB_FILE = 'subscriptions.db'
+# Get database URL from environment variable
+DATABASE_URL = os.getenv('DATABASE_URL')
+
+def get_connection():
+    """Get database connection"""
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL environment variable not set!")
+    return psycopg2.connect(DATABASE_URL)
 
 def init_db():
     """Initialize database with subscriptions table"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT NOT NULL UNIQUE,
-            morning_train TEXT NOT NULL,
-            evening_train TEXT NOT NULL,
-            delay_alerts BOOLEAN DEFAULT 1,
-            ontime_alerts BOOLEAN DEFAULT 1,
-            verification_code TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
-    print("✅ Database initialized")
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id SERIAL PRIMARY KEY,
+                phone TEXT NOT NULL UNIQUE,
+                morning_train TEXT NOT NULL,
+                evening_train TEXT NOT NULL,
+                delay_alerts BOOLEAN DEFAULT TRUE,
+                ontime_alerts BOOLEAN DEFAULT TRUE,
+                verification_code TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        print("✅ Database initialized (PostgreSQL)")
+    except Exception as e:
+        print(f"❌ Database initialization failed: {e}")
+        raise
 
 def save_subscription(phone: str, morning_train: str, evening_train: str, 
                      delay_alerts: bool = True, ontime_alerts: bool = True) -> str:
@@ -41,27 +54,28 @@ def save_subscription(phone: str, morning_train: str, evening_train: str,
     """
     verification_code = str(random.randint(100000, 999999))
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_connection()
     c = conn.cursor()
     
     try:
         c.execute('''
             INSERT INTO subscriptions 
             (phone, morning_train, evening_train, delay_alerts, ontime_alerts, verification_code, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending')
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending')
         ''', (phone, morning_train, evening_train, delay_alerts, ontime_alerts, verification_code))
         
         conn.commit()
         print(f"📝 Subscription saved for {phone} (pending verification)")
         return verification_code
     
-    except sqlite3.IntegrityError:
+    except psycopg2.IntegrityError:
         # Phone already exists, update instead
+        conn.rollback()
         c.execute('''
             UPDATE subscriptions 
-            SET morning_train=?, evening_train=?, delay_alerts=?, ontime_alerts=?, 
-                verification_code=?, status='pending', updated_at=?
-            WHERE phone=?
+            SET morning_train=%s, evening_train=%s, delay_alerts=%s, ontime_alerts=%s, 
+                verification_code=%s, status='pending', updated_at=%s
+            WHERE phone=%s
         ''', (morning_train, evening_train, delay_alerts, ontime_alerts, 
               verification_code, datetime.now(), phone))
         
@@ -77,17 +91,17 @@ def verify_subscription(phone: str, code: str) -> bool:
     Verify subscription with code
     Returns True if successful
     """
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_connection()
     c = conn.cursor()
     
-    c.execute('SELECT verification_code FROM subscriptions WHERE phone=?', (phone,))
+    c.execute('SELECT verification_code FROM subscriptions WHERE phone=%s', (phone,))
     result = c.fetchone()
     
     if result and result[0] == code:
         c.execute('''
             UPDATE subscriptions 
-            SET status='active', verification_code=NULL, updated_at=?
-            WHERE phone=?
+            SET status='active', verification_code=NULL, updated_at=%s
+            WHERE phone=%s
         ''', (datetime.now(), phone))
         conn.commit()
         conn.close()
@@ -100,8 +114,8 @@ def verify_subscription(phone: str, code: str) -> bool:
 
 def get_active_subscriptions() -> List[Dict]:
     """Get all active subscriptions"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
+    conn = get_connection()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     
     c.execute('''
         SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts
@@ -112,49 +126,35 @@ def get_active_subscriptions() -> List[Dict]:
     results = c.fetchall()
     conn.close()
     
-    subscriptions = []
-    for row in results:
-        subscriptions.append({
-            'phone': row[0],
-            'morning_train': row[1],
-            'evening_train': row[2],
-            'delay_alerts': bool(row[3]),
-            'ontime_alerts': bool(row[4])
-        })
+    # Convert RealDictRow to regular dict
+    subscriptions = [dict(row) for row in results]
     
     return subscriptions
 
 def get_subscription(phone: str) -> Optional[Dict]:
     """Get subscription by phone number"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
+    conn = get_connection()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     
     c.execute('''
         SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, status
         FROM subscriptions 
-        WHERE phone=?
+        WHERE phone=%s
     ''', (phone,))
     
     result = c.fetchone()
     conn.close()
     
     if result:
-        return {
-            'phone': result[0],
-            'morning_train': result[1],
-            'evening_train': result[2],
-            'delay_alerts': bool(result[3]),
-            'ontime_alerts': bool(result[4]),
-            'status': result[5]
-        }
+        return dict(result)
     return None
 
 def delete_subscription(phone: str) -> bool:
     """Delete a subscription"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_connection()
     c = conn.cursor()
     
-    c.execute('DELETE FROM subscriptions WHERE phone=?', (phone,))
+    c.execute('DELETE FROM subscriptions WHERE phone=%s', (phone,))
     deleted = c.rowcount > 0
     
     conn.commit()
