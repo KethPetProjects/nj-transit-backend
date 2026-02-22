@@ -6,6 +6,7 @@ import requests
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 import os
+from cache import cache_get, cache_set
 
 class NJTransitAPI:
     """NJ Transit API Client"""
@@ -29,11 +30,14 @@ class NJTransitAPI:
     
     def get_token(self) -> str:
         """Get authentication token (valid for 24 hours, limit 10 calls/day)"""
-        # Check if we have a valid cached token
-        if self.token and self.token_expiry and datetime.now() < self.token_expiry:
-            return self.token
         
-        # Get new token
+        # Check cache first
+        cached_token = cache_get('nj_transit_token')
+        if cached_token:
+            print("✅ Using cached NJT API token")
+            return cached_token
+        
+        # Get new token from API
         url = f"{self.base_url}/getToken"
         
         # Use files parameter for multipart/form-data (like curl -F)
@@ -48,11 +52,13 @@ class NJTransitAPI:
             result = response.json()
             
             if result.get('Authenticated') == 'True':
-                self.token = result['UserToken']
-                # Token expires in 24 hours
-                self.token_expiry = datetime.now() + timedelta(hours=23, minutes=50)
-                print(f"✅ Got new NJT API token (expires in 24 hours)")
-                return self.token
+                token = result['UserToken']
+                
+                # Cache token for 23.5 hours (expires in 24h, we refresh early)
+                cache_set('nj_transit_token', token, ttl_hours=23.5)
+                
+                print(f"✅ Got new NJT API token (cached for 23.5 hours)")
+                return token
             else:
                 print("❌ Authentication failed")
                 return None
@@ -65,7 +71,16 @@ class NJTransitAPI:
         Get full day train schedule for a specific station
         Uses getStationSchedule which returns 27 hours of schedule
         Returns trains grouped by direction (to-NYC/from-NYC)
+        
+        CACHED for 24 hours to avoid hitting 5 calls/day limit!
         """
+        
+        # Check cache first (IMPORTANT: avoids rate limit!)
+        cache_key = f'station_schedule_{station_code}'
+        cached_schedule = cache_get(cache_key)
+        if cached_schedule:
+            print(f"✅ Using cached schedule for {station_code}")
+            return cached_schedule
         
         # If no credentials, fall back to mock
         if not self.username or not self.password:
@@ -92,7 +107,13 @@ class NJTransitAPI:
             result = response.json()
             
             # Parse and organize trains
-            return self._organize_full_schedule(result, station_code)
+            schedule = self._organize_full_schedule(result, station_code)
+            
+            # Cache for 24 hours (critical to avoid rate limit!)
+            cache_set(cache_key, schedule, ttl_hours=24)
+            print(f"💾 Cached schedule for {station_code} (24 hours)")
+            
+            return schedule
             
         except Exception as e:
             print(f"❌ Error getting station schedule: {e}")
