@@ -1,98 +1,157 @@
 """
-Simple file-based cache for NJ Transit API data
+PostgreSQL-based cache for NJ Transit API data
+Replaces file-based /tmp/ cache which was wiped on container restarts
 Caches tokens and train schedules to avoid hitting rate limits
 """
 import json
 import os
-from datetime import datetime, timedelta
-from typing import Optional, Dict
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
-# Cache directory
-CACHE_DIR = '/tmp/nj_transit_cache'
+# Get database URL from environment variable
+DATABASE_URL = os.getenv('DATABASE_URL')
 
-# Ensure cache directory exists
-os.makedirs(CACHE_DIR, exist_ok=True)
+def get_connection():
+    """Get database connection"""
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL environment variable not set!")
+    return psycopg2.connect(DATABASE_URL)
 
-def _get_cache_path(key: str) -> str:
-    """Get file path for cache key"""
-    # Sanitize key for filename
-    safe_key = key.replace('/', '_').replace(':', '_')
-    return os.path.join(CACHE_DIR, f'{safe_key}.json')
-
-def cache_set(key: str, value: any, ttl_hours: int = 24):
+def cache_set(key: str, value: any, ttl_hours: float = 24):
     """
     Store value in cache with TTL (time to live)
-    
-    Args:
-        key: Cache key
-        value: Value to cache (must be JSON serializable)
-        ttl_hours: Time to live in hours (default: 24)
+    Persists across container restarts!
     """
-    cache_data = {
-        'value': value,
-        'expires_at': (datetime.now() + timedelta(hours=ttl_hours)).isoformat()
-    }
-    
-    cache_path = _get_cache_path(key)
-    
+    # Use UTC to match Postgres NOW()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+
     try:
-        with open(cache_path, 'w') as f:
-            json.dump(cache_data, f)
-        print(f"💾 Cached: {key} (expires in {ttl_hours}h)")
+        conn = get_connection()
+        c = conn.cursor()
+
+        c.execute('''
+            INSERT INTO cache (key, value, expires_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value,
+                expires_at = EXCLUDED.expires_at
+        ''', (key, json.dumps(value), expires_at))
+
+        conn.commit()
+        conn.close()
+        print(f"💾 Cached: {key} (expires in {ttl_hours}h, at {expires_at})")
+
     except Exception as e:
         print(f"⚠️  Cache write failed for {key}: {e}")
 
 def cache_get(key: str) -> Optional[any]:
     """
     Get value from cache if not expired
-    
-    Args:
-        key: Cache key
-        
-    Returns:
-        Cached value if found and not expired, None otherwise
+    Returns None if not found or expired
     """
-    cache_path = _get_cache_path(key)
-    
-    if not os.path.exists(cache_path):
-        return None
-    
     try:
-        with open(cache_path, 'r') as f:
-            cache_data = json.load(f)
-        
-        # Check if expired
-        expires_at = datetime.fromisoformat(cache_data['expires_at'])
-        if datetime.now() > expires_at:
-            print(f"⏰ Cache expired: {key}")
-            os.remove(cache_path)
+        conn = get_connection()
+        c = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Debug: check what's in the row regardless of expiry
+        c.execute('SELECT key, expires_at, NOW() as db_now FROM cache WHERE key = %s', (key,))
+        debug = c.fetchone()
+        if debug:
+            print(f"   🔍 Row found: expires_at={debug['expires_at']}, db_now={debug['db_now']}")
+        else:
+            print(f"   🔍 No row found for key: {key}")
+
+        # Get value only if not expired (timezone-aware comparison)
+        c.execute('''
+            SELECT value FROM cache
+            WHERE key = %s AND expires_at > NOW() AT TIME ZONE 'UTC'
+        ''', (key,))
+
+        result = c.fetchone()
+        conn.close()
+
+        if result:
+            print(f"✅ Cache hit: {key}")
+            val = result['value']
+            # psycopg2 auto-parses JSONB - handle dict, string, and plain values
+            if isinstance(val, (dict, list)):
+                return val  # already parsed by psycopg2
+            if isinstance(val, str):
+                try:
+                    return json.loads(val)  # try parsing as JSON
+                except (json.JSONDecodeError, ValueError):
+                    return val  # plain string (e.g. token), return as-is
+            return val
+        else:
+            print(f"❌ Cache miss: {key}")
             return None
-        
-        print(f"✅ Cache hit: {key}")
-        return cache_data['value']
-    
+
     except Exception as e:
         print(f"⚠️  Cache read failed for {key}: {e}")
         return None
 
 def cache_delete(key: str):
-    """Delete a cache entry"""
-    cache_path = _get_cache_path(key)
-    
+    """Delete a specific cache entry"""
     try:
-        if os.path.exists(cache_path):
-            os.remove(cache_path)
-            print(f"🗑️  Cache deleted: {key}")
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('DELETE FROM cache WHERE key = %s', (key,))
+        conn.commit()
+        conn.close()
+        print(f"🗑️  Cache deleted: {key}")
     except Exception as e:
         print(f"⚠️  Cache delete failed for {key}: {e}")
 
 def cache_clear():
-    """Clear all cache entries"""
+    """Clear ALL cache entries (use with caution!)"""
     try:
-        for filename in os.listdir(CACHE_DIR):
-            file_path = os.path.join(CACHE_DIR, filename)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('DELETE FROM cache')
+        conn.commit()
+        conn.close()
         print("🗑️  Cache cleared")
     except Exception as e:
         print(f"⚠️  Cache clear failed: {e}")
+
+def cache_cleanup_expired():
+    """Remove expired entries from database (good housekeeping)"""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('DELETE FROM cache WHERE expires_at <= NOW()')
+        deleted = c.rowcount
+        conn.commit()
+        conn.close()
+        print(f"🧹 Cleaned up {deleted} expired cache entries")
+    except Exception as e:
+        print(f"⚠️  Cache cleanup failed: {e}")
+
+
+if __name__ == '__main__':
+    print("🧪 Testing PostgreSQL cache...\n")
+
+    print("Test 1: Writing to cache...")
+    cache_set('test_key', {'hello': 'world', 'number': 42}, ttl_hours=1)
+
+    print("\nTest 2: Reading from cache...")
+    result = cache_get('test_key')
+    if result:
+        print(f"✅ Got value: {result}")
+    else:
+        print("❌ Cache miss - something went wrong!")
+
+    print("\nTest 3: Reading non-existent key...")
+    result = cache_get('does_not_exist')
+    if result is None:
+        print("✅ Correctly returned None for missing key")
+
+    print("\nTest 4: Deleting cache entry...")
+    cache_delete('test_key')
+    result = cache_get('test_key')
+    if result is None:
+        print("✅ Key successfully deleted")
+
+    print("\n✅ All tests passed! PostgreSQL cache is working.")
