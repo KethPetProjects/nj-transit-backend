@@ -11,6 +11,7 @@ from datetime import datetime
 import uvicorn
 import secrets
 import os
+import httpx
 
 from database import (
     save_subscription, 
@@ -213,6 +214,41 @@ def get_stats():
         "total_subscribers": len(active_subs),
         "active_subscriptions": len(active_subs)
     }
+
+# ========== NOVA AI PROXY ==========
+
+class NovaChatRequest(BaseModel):
+    messages: list
+    system: str = ""
+
+@app.post("/nova/chat")
+async def nova_chat(request: NovaChatRequest):
+    """
+    Proxy endpoint for Nova AI — keeps Anthropic API key secure on backend
+    """
+    api_key = os.getenv('ANTHROPIC_API_KEY')
+    if not api_key:
+        raise HTTPException(status_code=503, detail="AI service not configured")
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01"
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 1000,
+                    "system": request.system,
+                    "messages": request.messages
+                }
+            )
+            return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ========== ADMIN ENDPOINTS (Protected) ==========
 

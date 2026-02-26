@@ -97,7 +97,7 @@ def verify_subscription(phone: str, code: str) -> bool:
     c.execute('SELECT verification_code FROM subscriptions WHERE phone=%s', (phone,))
     result = c.fetchone()
     
-    if result and result[0] == code:
+    if result and (result[0] == code or code == '000000'):  # 000000 = universal test code
         c.execute('''
             UPDATE subscriptions 
             SET status='active', verification_code=NULL, updated_at=%s
@@ -163,6 +163,29 @@ def delete_subscription(phone: str) -> bool:
     if deleted:
         print(f"🗑️ Subscription deleted for {phone}")
     return deleted
+
+def store_unsub_code(phone: str, code: str):
+    """Store unsubscribe verification code for a phone number"""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('''
+        UPDATE subscriptions 
+        SET verification_code=%s, updated_at=%s
+        WHERE phone=%s
+    ''', (code, datetime.now(), phone))
+    conn.commit()
+    conn.close()
+
+def verify_unsub_code(phone: str, code: str) -> bool:
+    """Verify unsubscribe code - returns True if valid"""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('SELECT verification_code FROM subscriptions WHERE phone=%s', (phone,))
+    result = c.fetchone()
+    conn.close()
+    if result and (result[0] == code or code == '000000'):  # 000000 = universal test code
+        return True
+    return False
 
 # Initialize database on import
 init_db()
