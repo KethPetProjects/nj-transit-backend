@@ -18,7 +18,9 @@ from database import (
     verify_subscription, 
     get_subscription,
     delete_subscription,
-    get_active_subscriptions
+    get_active_subscriptions,
+    store_unsub_code,
+    verify_unsub_code
 )
 from notifications import SMSService
 from njtransit import NJTransitAPI
@@ -214,6 +216,51 @@ def get_stats():
         "total_subscribers": len(active_subs),
         "active_subscriptions": len(active_subs)
     }
+
+# ========== UNSUBSCRIBE WITH 2FA ==========
+
+class UnsubRequestModel(BaseModel):
+    phone: str
+
+class UnsubConfirmModel(BaseModel):
+    phone: str
+    code: str
+
+@app.post("/unsubscribe/request")
+def unsubscribe_request(request: UnsubRequestModel):
+    """Step 1: Request unsubscribe — sends verification code"""
+    try:
+        sub = get_subscription(request.phone)
+        if not sub:
+            raise HTTPException(status_code=404, detail="No subscription found for this number")
+        
+        import random
+        code = str(random.randint(100000, 999999))
+        store_unsub_code(request.phone, code)
+        sms_service.send_sms(request.phone, f"Your NJ Transit Alerts unsubscribe code is: {code}. Reply STOP or enter this code to confirm.")
+        return {"status": "code_sent", "message": "Verification code sent"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/unsubscribe/confirm")
+def unsubscribe_confirm(request: UnsubConfirmModel):
+    """Step 2: Confirm unsubscribe with verification code"""
+    try:
+        if not verify_unsub_code(request.phone, request.code):
+            raise HTTPException(status_code=400, detail="Invalid verification code")
+        
+        deleted = delete_subscription(request.phone)
+        if deleted:
+            sms_service.send_sms(request.phone, "You've been unsubscribed from NJ Transit Delay Alerts. Reply STOP to confirm. You can re-subscribe anytime at our website.")
+            return {"status": "unsubscribed", "message": "Successfully unsubscribed"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete subscription")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ========== NOVA AI PROXY ==========
 
