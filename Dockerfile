@@ -21,6 +21,7 @@ COPY database.py .
 COPY njtransit.py .
 COPY notifications.py .
 COPY cache.py .
+COPY gtfs.py .
 
 # Expose port 8000 for the API
 EXPOSE 8000
