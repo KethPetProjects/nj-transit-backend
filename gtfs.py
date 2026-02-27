@@ -32,7 +32,13 @@ def get_connection():
 
 
 def init_gtfs_tables():
-    """Create GTFS tables and indexes if they don't exist."""
+    """
+    Create GTFS tables and indexes if they don't exist.
+    Safe to call concurrently — duplicate-table errors are treated as success
+    because app.py and worker.py both import database.py on startup.
+    """
+    import psycopg2.errors
+
     conn = get_connection()
     c = conn.cursor()
     try:
@@ -95,6 +101,12 @@ def init_gtfs_tables():
 
         conn.commit()
         print("✅ GTFS tables initialized")
+    except (psycopg2.errors.DuplicateTable, psycopg2.errors.UniqueViolation):
+        # app.py and worker.py start concurrently in the same container and both
+        # import database.py, so both call this function at the same time.
+        # If another process won the race, the tables already exist — that's fine.
+        conn.rollback()
+        print("✅ GTFS tables already exist (concurrent init — OK)")
     except Exception as e:
         conn.rollback()
         print(f"❌ GTFS table initialization failed: {e}")
