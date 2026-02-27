@@ -127,9 +127,141 @@ CREATE TABLE subscriptions (
 - When approved: add TWILIO_* env vars to Azure → SMS goes live instantly
 
 ## Known Issues / TODO
-- Cache is file-based (/tmp) — lost on container restart (low priority, token cached in DB would be better)
 - Worker runs in same container as API (should be separate in production)
 - No monitoring/alerting set up yet
+
+## NEXT TASK — GTFS Implementation (replace getStationSchedule)
+**Status: Planned, not started**
+
+### Problem
+`getStationSchedule` has a 5 calls/day total limit across ALL stations and corridors.
+This is not scalable as users from multiple NJ Transit lines join.
+
+### Solution: Use NJ Transit GTFS Static Data
+NJ Transit publishes a free public GTFS zip (no auth, no rate limit):
+```
+https://www.njtransit.com/rail_data.zip
+```
+Updated by NJ Transit whenever schedules change (~seasonally).
+
+### GTFS Files We Need
+| File | Contents |
+|------|----------|
+| `stops.txt` | All stations: stop_id, stop_code (= 2-char code), stop_name, lat/lon |
+| `trips.txt` | All trips: trip_id, route_id, service_id, headsign |
+| `stop_times.txt` | Every stop for every trip: trip_id, stop_id, arrival_time, departure_time, pickup_type, drop_off_type |
+| `calendar_dates.txt` | Which service_id runs on which date (handles weekday/weekend/holiday) |
+| `routes.txt` | Line names and codes |
+
+### New File: gtfs.py
+Responsibilities:
+1. Download `rail_data.zip` from NJ Transit (on startup + weekly refresh)
+2. Parse CSV files from zip in memory
+3. Upsert into PostgreSQL tables
+4. Expose `get_station_schedule(station_code, date)` that queries DB
+
+### New Database Tables
+```sql
+CREATE TABLE gtfs_stops (
+    stop_id TEXT PRIMARY KEY,
+    stop_code TEXT,          -- 2-char NJT code (e.g. 'ED', 'NP')
+    stop_name TEXT,
+    stop_lat FLOAT,
+    stop_lon FLOAT
+);
+
+CREATE TABLE gtfs_routes (
+    route_id TEXT PRIMARY KEY,
+    route_short_name TEXT,   -- e.g. 'NEC', 'NJCL'
+    route_long_name TEXT     -- e.g. 'Northeast Corridor'
+);
+
+CREATE TABLE gtfs_trips (
+    trip_id TEXT PRIMARY KEY,
+    route_id TEXT,
+    service_id TEXT,
+    trip_headsign TEXT
+);
+
+CREATE TABLE gtfs_stop_times (
+    trip_id TEXT,
+    stop_id TEXT,
+    stop_sequence INTEGER,
+    arrival_time TEXT,
+    departure_time TEXT,
+    pickup_type INTEGER,     -- 0=normal, 1=no pickup
+    drop_off_type INTEGER,   -- 0=normal, 1=no dropoff
+    PRIMARY KEY (trip_id, stop_id)
+);
+
+CREATE TABLE gtfs_calendar_dates (
+    service_id TEXT,
+    date DATE,
+    exception_type INTEGER,  -- 1=service added, 2=service removed
+    PRIMARY KEY (service_id, date)
+);
+
+CREATE TABLE gtfs_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT               -- stores last_updated timestamp
+);
+```
+
+### Updated get_station_schedule Logic (in njtransit.py or gtfs.py)
+```python
+def get_station_schedule(station_code, date=None):
+    # date defaults to today
+    # 1. Find stop_id for station_code from gtfs_stops
+    # 2. Find all service_ids running on date from gtfs_calendar_dates
+    # 3. Join gtfs_stop_times + gtfs_trips filtered by stop_id + service_ids
+    # 4. Filter pickup_type=0 (trains that actually stop, not pass-through)
+    # 5. Split into outbound (to NYC) and inbound (from NYC) by headsign
+    # 6. Return same format as before: {'outbound': [...], 'inbound': [...]}
+```
+
+### Startup Logic (in app.py)
+```python
+# On startup:
+# 1. Call gtfs.load_or_refresh()
+#    - Check gtfs_metadata for last_updated
+#    - If never loaded OR older than 7 days: download + parse + upsert
+#    - Otherwise: skip (data already in DB)
+# 2. Schedule weekly refresh via background thread
+```
+
+### New Admin Endpoint
+```
+GET /admin/gtfs/refresh  — force re-download GTFS data (auth required)
+GET /admin/gtfs/status   — show last updated timestamp + record counts
+```
+
+### Files to Modify
+1. **NEW: `gtfs.py`** — download, parse, load GTFS into DB
+2. **`database.py`** — add `init_gtfs_tables()` function
+3. **`njtransit.py`** — replace `get_station_schedule()` to use GTFS DB instead of API
+4. **`app.py`** — call `gtfs.load_or_refresh()` on startup, add admin endpoints
+5. **`requirements.txt`** — no new deps needed (requests + psycopg2 already there)
+
+### Fallback
+Keep `_mock_station_trains()` as fallback if GTFS data not yet loaded.
+
+### NJ Transit API Endpoints (full list discovered)
+| Endpoint | Rate Limit | Use |
+|----------|-----------|-----|
+| `getToken` | 10/day | Auth — keep as-is |
+| `getStationSchedule` | 5/day | REPLACE with GTFS |
+| `getTrainSchedule` | 40,000/day | Real-time alerts — keep as-is |
+| `getTrainStopList` | 40,000/day | Get all stops for a train by ID |
+| `getStationList` | High | All station codes/names |
+| `getStationMSG` | High | Station alert messages |
+| `getVehicleData` | 40,000/day | GPS + delay for active trains |
+| `getTrainSchedule19Rec` | 40,000/day | Same as getTrainSchedule, no stops |
+| `isValidToken` | 10/day | Token validation |
+
+### Key Insight on Pass-Through Bug
+Train 3828 showed at Edison when it shouldn't. GTFS fixes this permanently:
+- `pickup_type=0 AND drop_off_type=0` = normal stop (train actually stops)
+- Any other value = conditional/no stop — filter these OUT
 
 ## Important: Never Do This
 - Never commit .env files
