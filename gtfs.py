@@ -757,6 +757,52 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
         return {'outbound': [], 'inbound': []}
 
 
+def get_train_origin_njt_code(train_number: str, query_date: Optional[date] = None) -> Optional[str]:
+    """
+    Return the NJT 2-char station code for the first stop of train_number on
+    query_date (defaults to today).  Uses GTFS block_id → trip → first stop →
+    njt_code so that the worker can query getTrainSchedule at the correct origin
+    station (e.g. NY Penn for evening trains, not Newark Penn).
+    Returns None if the train is not in GTFS for that date.
+    """
+    if query_date is None:
+        query_date = date.today()
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+
+        c.execute(
+            'SELECT service_id FROM gtfs_calendar_dates WHERE date = %s AND exception_type = 1',
+            (query_date,)
+        )
+        service_ids = [r[0] for r in c.fetchall()]
+        if not service_ids:
+            conn.close()
+            return None
+
+        c.execute('''
+            SELECT s.njt_code, s.stop_name
+            FROM gtfs_stop_times st
+            JOIN gtfs_trips t ON st.trip_id = t.trip_id
+            JOIN gtfs_stops s ON st.stop_id = s.stop_id
+            WHERE t.block_id = %s
+              AND t.service_id = ANY(%s)
+              AND s.njt_code IS NOT NULL
+            ORDER BY st.stop_sequence ASC
+            LIMIT 1
+        ''', (train_number, service_ids))
+
+        result = c.fetchone()
+        conn.close()
+        if result:
+            print(f"🔍 GTFS origin for train {train_number}: {result[1]} ({result[0]})")
+            return result[0]
+        return None
+    except Exception as e:
+        print(f"⚠️ Could not get GTFS origin for train {train_number}: {e}")
+        return None
+
+
 def get_status() -> dict:
     """Return GTFS data status: last updated timestamp + record counts."""
     try:

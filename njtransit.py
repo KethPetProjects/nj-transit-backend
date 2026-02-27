@@ -217,14 +217,25 @@ class NJTransitAPI:
             print("⚠️ Failed to get token, using mock data")
             return self._mock_train_status(train_number)
         
-        # For now, get all trains from Newark Penn and find our train
-        # In production, you'd cache this data and refresh every few minutes
+        # Look up the train's origin station from GTFS so we check the delay
+        # AT the departure point, not at an arbitrary intermediate stop (Newark Penn).
+        # For evening trains originating at NY Penn this is critical — the delay
+        # at NY Penn is what commuters boarding there actually care about.
+        origin_station = 'NP'  # fallback: Newark Penn
+        try:
+            import gtfs as _gtfs
+            gtfs_origin = _gtfs.get_train_origin_njt_code(train_number)
+            if gtfs_origin:
+                origin_station = gtfs_origin
+        except Exception as _e:
+            print(f"⚠️ GTFS origin lookup failed for {train_number}: {_e}")
+
         url = f"{self.base_url}/getTrainSchedule"
-        
+
         # Use files parameter for multipart/form-data
         files = {
             'token': (None, token),
-            'station': (None, 'NP')  # Newark Penn Station
+            'station': (None, origin_station)
         }
         
         try:
