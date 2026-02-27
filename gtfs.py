@@ -453,6 +453,16 @@ def _map_njt_codes():
 
     print(f"  🗺️  Built NJT code map: {len(njt_map)} entries")
 
+    def _normalize(name: str) -> str:
+        """Normalize station name for matching — handle JCT./JUNCTION etc."""
+        n = name.upper().strip()
+        n = n.replace('JCT.', 'JUNCTION').replace(' JCT', ' JUNCTION')
+        n = n.replace('.', '').strip()
+        return n
+
+    # Also build a normalized version of the NJT map for fuzzy matching
+    njt_map_norm = {_normalize(k): v for k, v in njt_map.items()}
+
     # Load GTFS stops and match by name
     conn = get_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -462,12 +472,15 @@ def _map_njt_codes():
     updates = []
     for stop in stops:
         gtfs_name = (stop['stop_name'] or '').upper().strip()
-        code = njt_map.get(gtfs_name)
+        gtfs_norm = _normalize(gtfs_name)
+
+        # Try exact, then normalized exact, then strip common suffixes
+        code = (njt_map.get(gtfs_name) or
+                njt_map_norm.get(gtfs_norm))
         if not code:
-            # Try stripping GTFS suffixes
-            for suffix in (' STATION', ' TRANSIT CENTER', ' JCT.', ' JCT'):
-                if gtfs_name.endswith(suffix):
-                    code = njt_map.get(gtfs_name[:-len(suffix)].strip())
+            for suffix in (' STATION', ' TRANSIT CENTER', ' JUNCTION', ' TERM'):
+                if gtfs_norm.endswith(suffix):
+                    code = njt_map_norm.get(gtfs_norm[:-len(suffix)].strip())
                     if code:
                         break
         if code:
@@ -561,19 +574,17 @@ def load_or_refresh():
         else:
             age_h = (datetime.now() - last_updated).total_seconds() / 3600
             print(f"✅ GTFS data is current (last updated {age_h:.1f} hours ago)")
-            needs_work = False
-            # Check if njt_code mapping is missing (schema upgrade)
-            if not _njt_codes_mapped():
-                print("🗺️  njt_code not yet populated — running station code mapping...")
-                _map_njt_codes()
-                needs_work = True
             # Check if block_id is missing from trips (schema upgrade)
             if not _block_ids_loaded():
                 print("🔄 block_id missing from trips — forcing full GTFS reload...")
                 download_and_load()
-                needs_work = True
-            if not needs_work:
-                print("✅ All GTFS data is current — skipping download")
+            else:
+                # Always re-run station code mapping on startup — it's fast
+                # (one API call) and self-heals any missed stations from previous
+                # runs without requiring a full GTFS re-download.
+                print("🗺️  Re-running NJT station code mapping...")
+                _map_njt_codes()
+                print("✅ All GTFS data is current")
     except Exception as e:
         print(f"❌ GTFS load_or_refresh failed: {e}")
 
