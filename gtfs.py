@@ -649,6 +649,7 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
             SELECT
                 st.departure_time,
                 st.arrival_time,
+                st.stop_sequence,
                 t.trip_id,
                 t.block_id,
                 t.trip_headsign,
@@ -678,11 +679,21 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
             headsign = (train['trip_headsign'] or '').lower()
             raw_time = train['departure_time'] or train['arrival_time'] or ''
             train_id = train['block_id'] or train['trip_id']
+            stop_seq = train['stop_sequence']
 
             dedup_key = (train_id, raw_time)
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
+
+            is_to_nyc = any(dest in headsign for dest in NYC_DESTINATIONS)
+
+            # For inbound trains, skip if this station is the train's first stop.
+            # stop_sequence=1 means the train ORIGINATES here — it is departing FROM
+            # this station (e.g. Princeton Branch shuttle departing Princeton Junction
+            # toward Princeton), not arriving from the NYC direction.
+            if not is_to_nyc and stop_seq == 1:
+                continue
 
             train_info = {
                 'id': train_id,
@@ -692,7 +703,7 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
                 '_raw_time': raw_time,  # kept for sorting, stripped before return
             }
 
-            if any(dest in headsign for dest in NYC_DESTINATIONS):
+            if is_to_nyc:
                 outbound.append(train_info)
             else:
                 inbound.append(train_info)
