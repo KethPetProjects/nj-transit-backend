@@ -71,27 +71,28 @@ class NJTransitAPI:
         Get full day train schedule for a specific station
         Uses getStationSchedule which returns 27 hours of schedule
         Returns trains grouped by direction (to-NYC/from-NYC)
-        
+
         CACHED for 24 hours to avoid hitting 5 calls/day limit!
+        One API call caches ALL stations in the response (entire line).
         """
-        
+
         # Check cache first (IMPORTANT: avoids rate limit!)
         cache_key = f'station_schedule_{station_code}'
         cached_schedule = cache_get(cache_key)
         if cached_schedule:
             print(f"✅ Using cached schedule for {station_code}")
             return cached_schedule
-        
+
         # If no credentials, fall back to mock
         if not self.username or not self.password:
             return self._mock_station_trains(station_code)
-        
+
         # Get token
         token = self.get_token()
         if not token:
             print("⚠️ Failed to get token, using mock data")
             return self._mock_station_trains(station_code)
-        
+
         # Get FULL DAY schedule from NJ Transit API
         # This endpoint gives 27 hours of schedule (limit: 5 calls/day)
         url = f"{self.base_url}/getStationSchedule"
@@ -100,84 +101,107 @@ class NJTransitAPI:
             'station': (None, station_code),
             'NJTOnly': (None, 'true')  # Filter to NJ Transit trains only
         }
-        
+
         try:
             response = requests.post(url, files=files)
             response.raise_for_status()
             result = response.json()
-            
-            # Parse and organize trains
-            schedule = self._organize_full_schedule(result, station_code)
-            
-            # Cache for 24 hours (critical to avoid rate limit!)
-            cache_set(cache_key, schedule, ttl_hours=24)
-            print(f"💾 Cached schedule for {station_code} (24 hours)")
-            
-            return schedule
-            
+
+            # Validate response — API errors return a dict, not a list
+            if not isinstance(result, list):
+                print(f"❌ Unexpected API response for {station_code} (not a list): {str(result)[:200]}")
+                return self._mock_station_trains(station_code)
+
+            # Cache ALL stations in the response (entire line in one API call)
+            # This prevents exhausting the 5 calls/day limit
+            self._cache_all_stations(result)
+
+            # Return the specific station requested
+            schedule = cache_get(cache_key)
+            if schedule:
+                return schedule
+
+            # Station code not found in API response
+            print(f"⚠️ Station {station_code} not found in API response")
+            return {'outbound': [], 'inbound': []}
+
         except Exception as e:
-            print(f"❌ Error getting station schedule: {e}")
+            print(f"❌ Error getting station schedule for {station_code}: {e}")
             return self._mock_station_trains(station_code)
-    
-    def _organize_full_schedule(self, api_response: list, station_code: str) -> dict:
+
+    def _cache_all_stations(self, api_response: list):
         """
-        Organize full day schedule into to-NYC and from-NYC trains
-        API returns list of stations, we need to find our station
+        Cache schedules for ALL stations returned in the API response.
+        The API returns the full line schedule — one call covers all stations on the line.
+        """
+        for station_data in api_response:
+            code = station_data.get('STATION_2CHAR')
+            if not code:
+                continue
+            cache_key = f'station_schedule_{code}'
+            # Only cache if not already cached (avoid unnecessary writes)
+            if cache_get(cache_key) is None:
+                schedule = self._parse_station_data(station_data)
+                cache_set(cache_key, schedule, ttl_hours=24)
+                print(f"💾 Bulk-cached schedule for {code}")
+    
+    def _parse_station_data(self, station_data: dict) -> dict:
+        """
+        Parse a single station's train items into outbound/inbound lists.
         """
         to_nyc = []
         from_nyc = []
-        
+
         # Major destination hubs (where people work)
         nyc_destinations = [
             'New York', 'NY Penn', 'PSNY', 'Penn Station New York',
             'Newark', 'Newark Penn', 'Hoboken', 'Jersey City', 'Secaucus'
         ]
-        
-        # Find our station in the response
+
+        items = station_data.get('ITEMS', [])
+        for train in items:
+            train_id = train.get('TRAIN_ID')
+            destination = train.get('DESTINATION', '')
+            sched_time = train.get('SCHED_DEP_DATE', '')
+            line = train.get('LINE', '')
+
+            if not train_id:
+                continue
+
+            try:
+                dt = datetime.strptime(sched_time, '%d-%b-%Y %I:%M:%S %p')
+                time_str = dt.strftime('%I:%M %p')
+            except:
+                time_str = sched_time
+
+            train_info = {
+                'id': train_id,
+                'time': time_str,
+                'destination': destination,
+                'line': line
+            }
+
+            is_to_nyc = any(hub in destination for hub in nyc_destinations)
+            if is_to_nyc:
+                to_nyc.append(train_info)
+            else:
+                from_nyc.append(train_info)
+
+        return {
+            'outbound': to_nyc,
+            'inbound': from_nyc
+        }
+
+    def _organize_full_schedule(self, api_response: list, station_code: str) -> dict:
+        """
+        Organize full day schedule into to-NYC and from-NYC trains.
+        Kept for backward compatibility — prefer _cache_all_stations + cache_get.
+        """
         for station_data in api_response:
             if station_data.get('STATION_2CHAR') == station_code:
-                items = station_data.get('ITEMS', [])
-                
-                for train in items:
-                    train_id = train.get('TRAIN_ID')
-                    destination = train.get('DESTINATION', '')
-                    sched_time = train.get('SCHED_DEP_DATE', '')
-                    line = train.get('LINE', '')
-                    
-                    # Skip if no train ID
-                    if not train_id:
-                        continue
-                    
-                    # Parse time
-                    try:
-                        dt = datetime.strptime(sched_time, '%d-%b-%Y %I:%M:%S %p')
-                        time_str = dt.strftime('%I:%M %p')
-                        hour = dt.hour
-                    except:
-                        time_str = sched_time
-                        hour = 0
-                    
-                    train_info = {
-                        'id': train_id,
-                        'time': time_str,
-                        'destination': destination,
-                        'line': line
-                    }
-                    
-                    # Classify: Is this train going TO NYC or FROM NYC?
-                    is_to_nyc = any(hub in destination for hub in nyc_destinations)
-                    
-                    if is_to_nyc:
-                        to_nyc.append(train_info)
-                    else:
-                        from_nyc.append(train_info)
-                
-                break  # Found our station, no need to continue
-        
-        return {
-            'outbound': to_nyc,     # To NYC
-            'inbound': from_nyc     # From NYC
-        }
+                return self._parse_station_data(station_data)
+
+        return {'outbound': [], 'inbound': []}
     
     def _mock_station_trains(self, station_code: str) -> dict:
         """Mock trains when API not available"""
