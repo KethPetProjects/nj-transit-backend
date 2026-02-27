@@ -112,39 +112,25 @@ class NJTransitAPI:
                 print(f"❌ Unexpected API response for {station_code} (not a list): {str(result)[:200]}")
                 return self._mock_station_trains(station_code)
 
-            # Cache ALL stations in the response (entire line in one API call)
-            # This prevents exhausting the 5 calls/day limit
-            self._cache_all_stations(result)
+            # Parse only the queried station — bulk-caching other stations
+            # from this response is inaccurate because it includes trains that
+            # pass through without stopping
+            schedule = self._organize_full_schedule(result, station_code)
 
-            # Return the specific station requested
-            schedule = cache_get(cache_key)
-            if schedule:
-                return schedule
+            if not schedule['outbound'] and not schedule['inbound']:
+                print(f"⚠️ Station {station_code} not found in API response")
+                return {'outbound': [], 'inbound': []}
 
-            # Station code not found in API response
-            print(f"⚠️ Station {station_code} not found in API response")
-            return {'outbound': [], 'inbound': []}
+            # Cache for 24 hours (critical to avoid rate limit!)
+            cache_set(cache_key, schedule, ttl_hours=24)
+            print(f"💾 Cached schedule for {station_code} (24 hours)")
+
+            return schedule
 
         except Exception as e:
             print(f"❌ Error getting station schedule for {station_code}: {e}")
             return self._mock_station_trains(station_code)
 
-    def _cache_all_stations(self, api_response: list):
-        """
-        Cache schedules for ALL stations returned in the API response.
-        The API returns the full line schedule — one call covers all stations on the line.
-        """
-        for station_data in api_response:
-            code = station_data.get('STATION_2CHAR')
-            if not code:
-                continue
-            cache_key = f'station_schedule_{code}'
-            # Only cache if not already cached (avoid unnecessary writes)
-            if cache_get(cache_key) is None:
-                schedule = self._parse_station_data(station_data)
-                cache_set(cache_key, schedule, ttl_hours=24)
-                print(f"💾 Bulk-cached schedule for {code}")
-    
     def _parse_station_data(self, station_data: dict) -> dict:
         """
         Parse a single station's train items into outbound/inbound lists.
