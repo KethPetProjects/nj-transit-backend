@@ -645,9 +645,11 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
 
         # 3. Query trains that stop at this station on this date.
         #    pickup_type=0 AND drop_off_type=0 = normal stop (not pass-through).
-        #    came_from_nyc: did this trip stop at a major NYC-area hub (Penn Station,
-        #    Hoboken, or Secaucus) at a lower stop_sequence than this station?
-        #    This correctly classifies inbound trains regardless of headsign.
+        #    nyc_departure_time: departure time at the NYC hub stop (Penn Station,
+        #    Hoboken, Secaucus, or Newark Penn) that occurred BEFORE this station.
+        #    NULL means the train did not come from an NYC hub — skip it as inbound.
+        #    For inbound trains we show the NYC hub departure time, not the home-station
+        #    time, because commuters board at NYC and need to know when to be there.
         c.execute('''
             SELECT
                 st.departure_time,
@@ -657,8 +659,9 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
                 t.block_id,
                 t.trip_headsign,
                 t.route_id,
-                EXISTS (
-                    SELECT 1 FROM gtfs_stop_times prior_st
+                (
+                    SELECT prior_st.departure_time
+                    FROM gtfs_stop_times prior_st
                     JOIN gtfs_stops prior_s ON prior_st.stop_id = prior_s.stop_id
                     WHERE prior_st.trip_id = t.trip_id
                       AND prior_st.stop_sequence < st.stop_sequence
@@ -668,7 +671,9 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
                         OR lower(prior_s.stop_name) LIKE '%%secaucus%%'
                         OR lower(prior_s.stop_name) LIKE '%%newark penn%%'
                       )
-                ) AS came_from_nyc
+                    ORDER BY prior_st.stop_sequence ASC
+                    LIMIT 1
+                ) AS nyc_departure_time
             FROM gtfs_stop_times st
             JOIN gtfs_trips t ON st.trip_id = t.trip_id
             WHERE st.stop_id = %s
@@ -683,9 +688,10 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
         print(f"🚂 {len(trains)} trains found for {station_code} on {query_date}")
 
         # 4. Split outbound (→ NYC) / inbound (← NYC).
-        #    - outbound: headsign contains a NYC destination
-        #    - inbound: came_from_nyc=True (trip had a NYC hub stop before this station)
-        #    - skip: trains that neither go to NYC nor came from NYC (local shuttles, etc.)
+        #    - outbound: headsign contains a NYC destination; time = depart home station
+        #    - inbound: nyc_departure_time is not NULL; time = depart NYC hub
+        #      (commuters board at NYC — they need the NYC departure time, not home-station arrival)
+        #    - skip: trains with no NYC connection at all (local shuttles, etc.)
         #    Deduplicate by (block_id, raw_time) — the Princeton Branch push-pull
         #    produces two trips with the same block_id stopping at the same station
         #    at the same time (one terminates there, one continues to Princeton).
@@ -696,8 +702,8 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
         for train in trains:
             headsign = (train['trip_headsign'] or '').lower()
             raw_time = train['departure_time'] or train['arrival_time'] or ''
+            nyc_time = train['nyc_departure_time'] or ''
             train_id = train['block_id'] or train['trip_id']
-            came_from_nyc = train['came_from_nyc']
 
             dedup_key = (train_id, raw_time)
             if dedup_key in seen:
@@ -706,21 +712,26 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
 
             is_to_nyc = any(dest in headsign for dest in NYC_DESTINATIONS)
 
-            train_info = {
-                'id': train_id,
-                'time': _format_gtfs_time(raw_time),
-                'destination': train['trip_headsign'] or '',
-                'line': train['route_id'] or '',
-                '_raw_time': raw_time,  # kept for sorting, stripped before return
-            }
-
             if is_to_nyc:
-                outbound.append(train_info)
-            elif came_from_nyc:
-                # Only show as inbound if this trip actually passed through a NYC-area
-                # hub earlier — filters out Princeton Branch shuttles, Trenton-originating
-                # trains, and any other local service that never went through NYC.
-                inbound.append(train_info)
+                # Outbound: show departure time from the home station
+                outbound.append({
+                    'id': train_id,
+                    'time': _format_gtfs_time(raw_time),
+                    'destination': train['trip_headsign'] or '',
+                    'line': train['route_id'] or '',
+                    '_raw_time': raw_time,
+                })
+            elif nyc_time:
+                # Inbound: show departure time from the NYC hub so commuters
+                # know when to be at Penn Station / Hoboken, not when the train
+                # arrives at their home station.
+                inbound.append({
+                    'id': train_id,
+                    'time': _format_gtfs_time(nyc_time),
+                    'destination': train['trip_headsign'] or '',
+                    'line': train['route_id'] or '',
+                    '_raw_time': nyc_time,  # sort by NYC departure time
+                })
 
         # Sort so that post-midnight times (25:xx, 26:xx) appear at the end,
         # not mixed with afternoon trains after 12-hour conversion.
