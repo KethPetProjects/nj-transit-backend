@@ -643,8 +643,11 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
         service_ids = [r['service_id'] for r in service_rows]
         print(f"🗓️  {len(service_ids)} service(s) active on {query_date}")
 
-        # 3. Query trains that stop at this station on this date
-        #    pickup_type=0 AND drop_off_type=0 = normal stop (not pass-through)
+        # 3. Query trains that stop at this station on this date.
+        #    pickup_type=0 AND drop_off_type=0 = normal stop (not pass-through).
+        #    came_from_nyc: did this trip stop at a major NYC-area hub (Penn Station,
+        #    Hoboken, or Secaucus) at a lower stop_sequence than this station?
+        #    This correctly classifies inbound trains regardless of headsign.
         c.execute('''
             SELECT
                 st.departure_time,
@@ -653,7 +656,19 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
                 t.trip_id,
                 t.block_id,
                 t.trip_headsign,
-                t.route_id
+                t.route_id,
+                EXISTS (
+                    SELECT 1 FROM gtfs_stop_times prior_st
+                    JOIN gtfs_stops prior_s ON prior_st.stop_id = prior_s.stop_id
+                    WHERE prior_st.trip_id = t.trip_id
+                      AND prior_st.stop_sequence < st.stop_sequence
+                      AND (
+                        lower(prior_s.stop_name) LIKE '%%penn station%%'
+                        OR lower(prior_s.stop_name) LIKE '%%hoboken%%'
+                        OR lower(prior_s.stop_name) LIKE '%%secaucus%%'
+                        OR lower(prior_s.stop_name) LIKE '%%newark penn%%'
+                      )
+                ) AS came_from_nyc
             FROM gtfs_stop_times st
             JOIN gtfs_trips t ON st.trip_id = t.trip_id
             WHERE st.stop_id = %s
@@ -667,7 +682,10 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
         conn.close()
         print(f"🚂 {len(trains)} trains found for {station_code} on {query_date}")
 
-        # 4. Split outbound (→ NYC) / inbound (← NYC) by headsign.
+        # 4. Split outbound (→ NYC) / inbound (← NYC).
+        #    - outbound: headsign contains a NYC destination
+        #    - inbound: came_from_nyc=True (trip had a NYC hub stop before this station)
+        #    - skip: trains that neither go to NYC nor came from NYC (local shuttles, etc.)
         #    Deduplicate by (block_id, raw_time) — the Princeton Branch push-pull
         #    produces two trips with the same block_id stopping at the same station
         #    at the same time (one terminates there, one continues to Princeton).
@@ -679,7 +697,7 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
             headsign = (train['trip_headsign'] or '').lower()
             raw_time = train['departure_time'] or train['arrival_time'] or ''
             train_id = train['block_id'] or train['trip_id']
-            stop_seq = train['stop_sequence']
+            came_from_nyc = train['came_from_nyc']
 
             dedup_key = (train_id, raw_time)
             if dedup_key in seen:
@@ -687,13 +705,6 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
             seen.add(dedup_key)
 
             is_to_nyc = any(dest in headsign for dest in NYC_DESTINATIONS)
-
-            # For inbound trains, skip if this station is the train's first stop.
-            # stop_sequence=1 means the train ORIGINATES here — it is departing FROM
-            # this station (e.g. Princeton Branch shuttle departing Princeton Junction
-            # toward Princeton), not arriving from the NYC direction.
-            if not is_to_nyc and stop_seq == 1:
-                continue
 
             train_info = {
                 'id': train_id,
@@ -705,7 +716,10 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
 
             if is_to_nyc:
                 outbound.append(train_info)
-            else:
+            elif came_from_nyc:
+                # Only show as inbound if this trip actually passed through a NYC-area
+                # hub earlier — filters out Princeton Branch shuttles, Trenton-originating
+                # trains, and any other local service that never went through NYC.
                 inbound.append(train_info)
 
         # Sort so that post-midnight times (25:xx, 26:xx) appear at the end,
