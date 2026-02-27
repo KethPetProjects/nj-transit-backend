@@ -509,9 +509,24 @@ def _load_calendar_dates(zf: zipfile.ZipFile):
 # Public interface
 # ---------------------------------------------------------------------------
 
+def _njt_codes_mapped() -> bool:
+    """Return True if at least one stop has an njt_code populated."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM gtfs_stops WHERE njt_code IS NOT NULL')
+        count = c.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception:
+        return False
+
+
 def load_or_refresh():
     """
     Check whether GTFS data is missing or stale and refresh if needed.
+    Also runs the NJT station-code mapping if it hasn't been done yet
+    (e.g. after a schema upgrade that added the njt_code column).
     Called on app startup in a background thread (non-blocking).
     """
     try:
@@ -525,7 +540,13 @@ def load_or_refresh():
             download_and_load()
         else:
             age_h = (datetime.now() - last_updated).total_seconds() / 3600
-            print(f"✅ GTFS data is current (last updated {age_h:.1f} hours ago — skipping download)")
+            print(f"✅ GTFS data is current (last updated {age_h:.1f} hours ago)")
+            # Check if njt_code mapping is missing (e.g. after schema upgrade)
+            if not _njt_codes_mapped():
+                print("🗺️  njt_code not yet populated — running station code mapping...")
+                _map_njt_codes()
+            else:
+                print("✅ NJT station code mapping already in place — skipping download")
     except Exception as e:
         print(f"❌ GTFS load_or_refresh failed: {e}")
 
