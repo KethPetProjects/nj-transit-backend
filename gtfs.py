@@ -655,25 +655,53 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
         conn.close()
         print(f"🚂 {len(trains)} trains found for {station_code} on {query_date}")
 
-        # 4. Split outbound (→ NYC) / inbound (← NYC) by headsign
+        # 4. Split outbound (→ NYC) / inbound (← NYC) by headsign.
+        #    Deduplicate by (block_id, raw_time) — the Princeton Branch push-pull
+        #    produces two trips with the same block_id stopping at the same station
+        #    at the same time (one terminates there, one continues to Princeton).
         outbound: List[dict] = []
         inbound: List[dict] = []
+        seen: set = set()  # (block_id, raw_time) already added
 
         for train in trains:
             headsign = (train['trip_headsign'] or '').lower()
             raw_time = train['departure_time'] or train['arrival_time'] or ''
+            train_id = train['block_id'] or train['trip_id']
+
+            dedup_key = (train_id, raw_time)
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
 
             train_info = {
-                'id': train['block_id'] or train['trip_id'],  # block_id = public NJT train number
+                'id': train_id,
                 'time': _format_gtfs_time(raw_time),
                 'destination': train['trip_headsign'] or '',
                 'line': train['route_id'] or '',
+                '_raw_time': raw_time,  # kept for sorting, stripped before return
             }
 
             if any(dest in headsign for dest in NYC_DESTINATIONS):
                 outbound.append(train_info)
             else:
                 inbound.append(train_info)
+
+        # Sort so that post-midnight times (25:xx, 26:xx) appear at the end,
+        # not mixed with afternoon trains after 12-hour conversion.
+        def sort_key(t: dict) -> int:
+            """Convert HH:MM:SS to total minutes; times ≥ 24h sort correctly as-is."""
+            parts = t['_raw_time'].split(':')
+            try:
+                return int(parts[0]) * 60 + int(parts[1])
+            except Exception:
+                return 9999
+
+        outbound.sort(key=sort_key)
+        inbound.sort(key=sort_key)
+
+        # Strip internal sort key before returning
+        for t in outbound + inbound:
+            t.pop('_raw_time', None)
 
         return {'outbound': outbound, 'inbound': inbound}
 
