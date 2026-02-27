@@ -187,5 +187,12 @@ def verify_unsub_code(phone: str, code: str) -> bool:
         return True
     return False
 
+def init_gtfs_tables():
+    """Create GTFS tables — delegates to gtfs module to keep schema in one place."""
+    import gtfs as _gtfs
+    _gtfs.init_gtfs_tables()
+
+
 # Initialize database on import
 init_db()
+init_gtfs_tables()

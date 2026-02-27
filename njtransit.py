@@ -68,38 +68,41 @@ class NJTransitAPI:
     
     def get_station_schedule(self, station_code: str) -> dict:
         """
-        Get full day train schedule for a specific station
-        Uses getStationSchedule which returns 27 hours of schedule
-        Returns trains grouped by direction (to-NYC/from-NYC)
-
-        CACHED for 24 hours to avoid hitting 5 calls/day limit!
-        One API call caches ALL stations in the response (entire line).
+        Get full day train schedule for a specific station.
+        Tries GTFS DB first (no rate limit, fixes pass-through bug).
+        Falls back to NJT API → mock if GTFS data is unavailable.
         """
+        import gtfs
 
-        # Check cache first (IMPORTANT: avoids rate limit!)
+        # 1. Try GTFS (preferred — unlimited, accurate stop filtering)
+        gtfs_result = gtfs.get_station_schedule(station_code)
+        if gtfs_result['outbound'] or gtfs_result['inbound']:
+            print(f"✅ Served {station_code} schedule from GTFS")
+            return gtfs_result
+
+        print(f"⚠️ GTFS returned no trains for {station_code} — falling back to NJT API")
+
+        # 2. Fall back to NJT API (5 calls/day rate limit — use sparingly)
+        # Check cache first to protect the rate limit
         cache_key = f'station_schedule_{station_code}'
         cached_schedule = cache_get(cache_key)
         if cached_schedule:
-            print(f"✅ Using cached schedule for {station_code}")
+            print(f"✅ Using cached NJT API schedule for {station_code}")
             return cached_schedule
 
-        # If no credentials, fall back to mock
         if not self.username or not self.password:
             return self._mock_station_trains(station_code)
 
-        # Get token
         token = self.get_token()
         if not token:
             print("⚠️ Failed to get token, using mock data")
             return self._mock_station_trains(station_code)
 
-        # Get FULL DAY schedule from NJ Transit API
-        # This endpoint gives 27 hours of schedule (limit: 5 calls/day)
         url = f"{self.base_url}/getStationSchedule"
         files = {
             'token': (None, token),
             'station': (None, station_code),
-            'NJTOnly': (None, 'true')  # Filter to NJ Transit trains only
+            'NJTOnly': (None, 'true'),
         }
 
         try:
@@ -107,28 +110,22 @@ class NJTransitAPI:
             response.raise_for_status()
             result = response.json()
 
-            # Validate response — API errors return a dict, not a list
             if not isinstance(result, list):
-                print(f"❌ Unexpected API response for {station_code} (not a list): {str(result)[:200]}")
+                print(f"❌ Unexpected NJT API response for {station_code}: {str(result)[:200]}")
                 return self._mock_station_trains(station_code)
 
-            # Parse only the queried station — bulk-caching other stations
-            # from this response is inaccurate because it includes trains that
-            # pass through without stopping
             schedule = self._organize_full_schedule(result, station_code)
 
             if not schedule['outbound'] and not schedule['inbound']:
-                print(f"⚠️ Station {station_code} not found in API response")
+                print(f"⚠️ Station {station_code} not found in NJT API response")
                 return {'outbound': [], 'inbound': []}
 
-            # Cache for 24 hours (critical to avoid rate limit!)
             cache_set(cache_key, schedule, ttl_hours=24)
-            print(f"💾 Cached schedule for {station_code} (24 hours)")
-
+            print(f"💾 Cached NJT API schedule for {station_code} (24 hours)")
             return schedule
 
         except Exception as e:
-            print(f"❌ Error getting station schedule for {station_code}: {e}")
+            print(f"❌ NJT API error for {station_code}: {e}")
             return self._mock_station_trains(station_code)
 
     def _parse_station_data(self, station_data: dict) -> dict:

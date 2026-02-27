@@ -14,8 +14,8 @@ import os
 import httpx
 
 from database import (
-    save_subscription, 
-    verify_subscription, 
+    save_subscription,
+    verify_subscription,
     get_subscription,
     delete_subscription,
     get_active_subscriptions,
@@ -24,8 +24,16 @@ from database import (
 )
 from notifications import SMSService
 from njtransit import NJTransitAPI
+import gtfs
 
 app = FastAPI(title="NJ Transit Delay Alerts API")
+
+
+@app.on_event("startup")
+def on_startup():
+    """On startup: kick off GTFS data load in the background (non-blocking)."""
+    print("🚀 App startup — triggering GTFS load in background thread...")
+    gtfs.load_or_refresh_background()
 
 # Enable CORS for frontend
 app.add_middleware(
@@ -345,6 +353,20 @@ def admin_export_data(username: str = Depends(verify_admin)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ========== ADMIN GTFS ENDPOINTS (Protected) ==========
+
+@app.get("/admin/gtfs/status")
+def admin_gtfs_status(username: str = Depends(verify_admin)):
+    """Admin: Show GTFS data status — last updated timestamp and record counts."""
+    return gtfs.get_status()
+
+
+@app.get("/admin/gtfs/refresh")
+def admin_gtfs_refresh(username: str = Depends(verify_admin)):
+    """Admin: Force a full re-download of GTFS data (runs in background)."""
+    gtfs.load_or_refresh_background()
+    return {"status": "refresh_started", "message": "GTFS refresh triggered in background — check logs for progress"}
 
 # ================================================
 
