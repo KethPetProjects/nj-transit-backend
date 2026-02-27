@@ -48,8 +48,13 @@ def init_gtfs_tables():
                 stop_code TEXT,
                 stop_name TEXT,
                 stop_lat FLOAT,
-                stop_lon FLOAT
+                stop_lon FLOAT,
+                njt_code TEXT
             )
+        ''')
+        # Add njt_code column if upgrading from an older schema
+        c.execute('''
+            ALTER TABLE gtfs_stops ADD COLUMN IF NOT EXISTS njt_code TEXT
         ''')
         c.execute('''
             CREATE TABLE IF NOT EXISTS gtfs_routes (
@@ -95,6 +100,7 @@ def init_gtfs_tables():
 
         # Indexes for query performance
         c.execute('CREATE INDEX IF NOT EXISTS idx_gtfs_stops_code ON gtfs_stops (stop_code)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_gtfs_stops_njt ON gtfs_stops (njt_code)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_gtfs_trips_service ON gtfs_trips (service_id)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_stop ON gtfs_stop_times (stop_id)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_gtfs_calendar_date ON gtfs_calendar_dates (date, exception_type)')
@@ -193,6 +199,11 @@ def download_and_load():
             _load_calendar_dates(zf)
         else:
             print("⚠️ calendar_dates.txt not found in zip")
+
+    # Map NJT 2-char station codes onto gtfs_stops.njt_code so that
+    # get_station_schedule('ED') can find Edison via njt_code, not the
+    # GTFS numeric stop_code (e.g. '95038') which our API never uses.
+    _map_njt_codes()
 
     _set_last_updated()
     print("✅ GTFS data fully loaded!")
@@ -345,6 +356,123 @@ def _load_stop_times(zf: zipfile.ZipFile):
     print(f"  ✅ {total} stop times loaded")
 
 
+def _map_njt_codes():
+    """
+    Call NJT getStationList to get 2-char station codes (e.g. 'ED' for Edison),
+    match them to GTFS stops by name, and store in gtfs_stops.njt_code.
+    This is what makes get_station_schedule('ED') work with GTFS data.
+    """
+    base_url = os.getenv('NJT_API_URL', 'https://testraildata.njtransit.com/api/TrainData')
+    username = os.getenv('NJT_USERNAME')
+    password = os.getenv('NJT_PASSWORD')
+
+    if not username or not password:
+        print("  ⚠️ NJT credentials not set — skipping 2-char station code mapping")
+        return
+
+    # Reuse cached token if available, otherwise get a fresh one
+    token = None
+    try:
+        from cache import cache_get, cache_set
+        token = cache_get('nj_transit_token')
+    except Exception:
+        pass
+
+    if not token:
+        try:
+            resp = requests.post(
+                f"{base_url}/getToken",
+                files={'username': (None, username), 'password': (None, password)},
+                timeout=30
+            )
+            result = resp.json()
+            if result.get('Authenticated') == 'True':
+                token = result['UserToken']
+                try:
+                    cache_set('nj_transit_token', token, ttl_hours=23.5)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"  ⚠️ Could not get NJT token for station mapping: {e}")
+            return
+
+    if not token:
+        print("  ⚠️ No NJT token — skipping station code mapping")
+        return
+
+    # Call getStationList
+    print("  🗺️  Fetching NJT station list to map 2-char codes...")
+    try:
+        resp = requests.post(
+            f"{base_url}/getStationList",
+            files={'token': (None, token)},
+            timeout=30
+        )
+        resp.raise_for_status()
+        station_list = resp.json()
+    except Exception as e:
+        print(f"  ⚠️ getStationList failed: {e} — station code mapping skipped")
+        return
+
+    if not isinstance(station_list, list) or not station_list:
+        print(f"  ⚠️ Unexpected getStationList response — skipping mapping. Got: {str(station_list)[:200]}")
+        return
+
+    # Log the first entry so we know the field names
+    print(f"  📋 getStationList sample entry: {station_list[0]}")
+
+    # Build name → njt_code dict, trying several possible field names
+    njt_map: dict = {}  # normalized_name → 2-char code
+    for station in station_list:
+        code = (
+            station.get('STATION_2CHAR') or
+            station.get('station2Char') or
+            station.get('StationCode') or
+            ''
+        ).strip()
+        name = (
+            station.get('STATIONNAME') or
+            station.get('STATION_NAME') or
+            station.get('StationName') or
+            ''
+        ).strip().upper()
+
+        if code and name:
+            njt_map[name] = code
+            # Also index without common suffixes for fuzzy matching
+            for suffix in (' STATION', ' TRANSIT CENTER', ' JCT.', ' JCT', ' TERM'):
+                if name.endswith(suffix):
+                    njt_map[name[:-len(suffix)].strip()] = code
+
+    print(f"  🗺️  Built NJT code map: {len(njt_map)} entries")
+
+    # Load GTFS stops and match by name
+    conn = get_connection()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT stop_id, stop_name FROM gtfs_stops')
+    stops = c.fetchall()
+
+    updates = []
+    for stop in stops:
+        gtfs_name = (stop['stop_name'] or '').upper().strip()
+        code = njt_map.get(gtfs_name)
+        if not code:
+            # Try stripping GTFS suffixes
+            for suffix in (' STATION', ' TRANSIT CENTER', ' JCT.', ' JCT'):
+                if gtfs_name.endswith(suffix):
+                    code = njt_map.get(gtfs_name[:-len(suffix)].strip())
+                    if code:
+                        break
+        if code:
+            updates.append((code, stop['stop_id']))
+
+    for njt_code, stop_id in updates:
+        c.execute('UPDATE gtfs_stops SET njt_code = %s WHERE stop_id = %s', (njt_code, stop_id))
+    conn.commit()
+    conn.close()
+    print(f"  ✅ Mapped {len(updates)}/{len(stops)} stops to NJT 2-char codes")
+
+
 def _load_calendar_dates(zf: zipfile.ZipFile):
     print("  📅 Loading calendar dates...")
     rows = []
@@ -425,14 +553,15 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
         conn = get_connection()
         c = conn.cursor(cursor_factory=RealDictCursor)
 
-        # 1. Resolve station_code → stop_id
+        # 1. Resolve NJT 2-char station_code → stop_id via njt_code column
+        #    (njt_code is populated by _map_njt_codes() during GTFS load)
         c.execute(
-            'SELECT stop_id, stop_name FROM gtfs_stops WHERE stop_code = %s LIMIT 1',
+            'SELECT stop_id, stop_name FROM gtfs_stops WHERE njt_code = %s LIMIT 1',
             (station_code,)
         )
         stop_row = c.fetchone()
         if not stop_row:
-            print(f"⚠️ Station code '{station_code}' not found in GTFS stops")
+            print(f"⚠️ Station code '{station_code}' not found in GTFS stops (njt_code column not yet mapped)")
             conn.close()
             return {'outbound': [], 'inbound': []}
 
