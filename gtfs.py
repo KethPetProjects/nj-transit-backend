@@ -68,8 +68,13 @@ def init_gtfs_tables():
                 trip_id TEXT PRIMARY KEY,
                 route_id TEXT,
                 service_id TEXT,
-                trip_headsign TEXT
+                trip_headsign TEXT,
+                block_id TEXT
             )
+        ''')
+        # Add block_id column if upgrading from an older schema
+        c.execute('''
+            ALTER TABLE gtfs_trips ADD COLUMN IF NOT EXISTS block_id TEXT
         ''')
         c.execute('''
             CREATE TABLE IF NOT EXISTS gtfs_stop_times (
@@ -276,17 +281,19 @@ def _load_trips(zf: zipfile.ZipFile):
                 row.get('route_id', '').strip() or None,
                 row.get('service_id', '').strip() or None,
                 row.get('trip_headsign', '').strip() or None,
+                row.get('block_id', '').strip() or None,
             ))
 
     conn = get_connection()
     c = conn.cursor()
     execute_values(c, '''
-        INSERT INTO gtfs_trips (trip_id, route_id, service_id, trip_headsign)
+        INSERT INTO gtfs_trips (trip_id, route_id, service_id, trip_headsign, block_id)
         VALUES %s
         ON CONFLICT (trip_id) DO UPDATE SET
             route_id      = EXCLUDED.route_id,
             service_id    = EXCLUDED.service_id,
-            trip_headsign = EXCLUDED.trip_headsign
+            trip_headsign = EXCLUDED.trip_headsign,
+            block_id      = EXCLUDED.block_id
     ''', rows)
     conn.commit()
     conn.close()
@@ -522,6 +529,19 @@ def _njt_codes_mapped() -> bool:
         return False
 
 
+def _block_ids_loaded() -> bool:
+    """Return True if block_id is populated in gtfs_trips."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM gtfs_trips WHERE block_id IS NOT NULL')
+        count = c.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception:
+        return False
+
+
 def load_or_refresh():
     """
     Check whether GTFS data is missing or stale and refresh if needed.
@@ -541,12 +561,19 @@ def load_or_refresh():
         else:
             age_h = (datetime.now() - last_updated).total_seconds() / 3600
             print(f"✅ GTFS data is current (last updated {age_h:.1f} hours ago)")
-            # Check if njt_code mapping is missing (e.g. after schema upgrade)
+            needs_work = False
+            # Check if njt_code mapping is missing (schema upgrade)
             if not _njt_codes_mapped():
                 print("🗺️  njt_code not yet populated — running station code mapping...")
                 _map_njt_codes()
-            else:
-                print("✅ NJT station code mapping already in place — skipping download")
+                needs_work = True
+            # Check if block_id is missing from trips (schema upgrade)
+            if not _block_ids_loaded():
+                print("🔄 block_id missing from trips — forcing full GTFS reload...")
+                download_and_load()
+                needs_work = True
+            if not needs_work:
+                print("✅ All GTFS data is current — skipping download")
     except Exception as e:
         print(f"❌ GTFS load_or_refresh failed: {e}")
 
@@ -612,6 +639,7 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
                 st.departure_time,
                 st.arrival_time,
                 t.trip_id,
+                t.block_id,
                 t.trip_headsign,
                 t.route_id
             FROM gtfs_stop_times st
@@ -636,7 +664,7 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
             raw_time = train['departure_time'] or train['arrival_time'] or ''
 
             train_info = {
-                'id': train['trip_id'],
+                'id': train['block_id'] or train['trip_id'],  # block_id = public NJT train number
                 'time': _format_gtfs_time(raw_time),
                 'destination': train['trip_headsign'] or '',
                 'line': train['route_id'] or '',
