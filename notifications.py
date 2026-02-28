@@ -94,7 +94,7 @@ class SMSService:
         """Send on-time confirmation"""
         message = f"✅ Train {train_number} is departing on time at {departure_time}. Have a great commute!"
         print(f"\n📱 SMS SENT (MOCK)\n   To: {to_number}\n   Message: {message}\n   ✓ Delivered (simulated)")
-        self._send_ntfy(f"Train {train_number} On Time", message, priority="low")
+        self._send_ntfy(f"Train {train_number} On Time", message, priority="default")
         return True
 
 # Example usage:
