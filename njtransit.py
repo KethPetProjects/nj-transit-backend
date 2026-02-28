@@ -66,18 +66,22 @@ class NJTransitAPI:
             print(f"❌ Error getting token: {e}")
             return None
     
-    def get_station_schedule(self, station_code: str) -> dict:
+    def get_station_schedule(self, station_code: str, query_date=None) -> dict:
         """
         Get full day train schedule for a specific station.
         Tries GTFS DB first (no rate limit, fixes pass-through bug).
         Falls back to NJT API → mock if GTFS data is unavailable.
+        query_date: date object; defaults to today when None.
         """
         import gtfs
+        from datetime import date as _date
+        if query_date is None:
+            query_date = _date.today()
 
         # 1. Try GTFS (preferred — unlimited, accurate stop filtering)
-        gtfs_result = gtfs.get_station_schedule(station_code)
+        gtfs_result = gtfs.get_station_schedule(station_code, query_date=query_date)
         if gtfs_result['outbound'] or gtfs_result['inbound']:
-            print(f"✅ Served {station_code} schedule from GTFS")
+            print(f"✅ Served {station_code} schedule from GTFS ({query_date})")
             return gtfs_result
 
         print(f"⚠️ GTFS returned no trains for {station_code} — falling back to NJT API")

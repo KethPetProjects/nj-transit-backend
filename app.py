@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, date, timedelta
 import uvicorn
 import secrets
 import os
@@ -204,11 +204,28 @@ def get_trains():
         "evening": nj_transit.get_available_trains('inbound')
     }
 
+def _representative_date(schedule: str) -> date:
+    """Return the nearest upcoming date (including today) matching the schedule type."""
+    today = date.today()
+    wd = today.weekday()  # 0=Mon … 6=Sun
+    if schedule == 'saturday':
+        days = (5 - wd) % 7
+        return today + timedelta(days=days)
+    elif schedule == 'sunday':
+        days = (6 - wd) % 7
+        return today + timedelta(days=days)
+    else:  # weekday
+        if wd < 5:
+            return today
+        return today + timedelta(days=(7 - wd))  # next Monday
+
+
 @app.get("/trains/{station_code}")
-def get_station_trains(station_code: str):
-    """Get real trains for a specific station from NJ Transit API"""
+def get_station_trains(station_code: str, schedule: str = 'weekday'):
+    """Get trains for a specific station. schedule=weekday|saturday|sunday"""
     try:
-        trains_data = nj_transit.get_station_schedule(station_code)
+        query_date = _representative_date(schedule)
+        trains_data = nj_transit.get_station_schedule(station_code, query_date=query_date)
         return trains_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
