@@ -5,9 +5,17 @@ Sends alerts for delays and on-time confirmations
 import schedule
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from database import get_active_subscriptions
 from njtransit import NJTransitAPI
 from notifications import SMSService
+
+# Container runs in UTC but all NJT/GTFS times are Eastern — use Eastern throughout
+EASTERN = ZoneInfo('America/New_York')
+
+def _now_et() -> datetime:
+    """Current time as a naive Eastern datetime (matches GTFS/NJT API times)."""
+    return datetime.now(EASTERN).replace(tzinfo=None)
 
 # Initialize services
 nj_transit = NJTransitAPI()
@@ -21,7 +29,7 @@ def check_trains():
     Main function: Check all subscribed trains
     Runs every 5 minutes
     """
-    print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] Checking trains...")
+    print(f"\n🔍 [{_now_et().strftime('%H:%M:%S')}] Checking trains...")
     
     # Get all active subscriptions
     subscriptions = get_active_subscriptions()
@@ -72,20 +80,20 @@ def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bo
     # Check if we already sent this alert today
     if alert_key in sent_alerts:
         last_sent = sent_alerts[alert_key]
-        if (datetime.now() - last_sent).total_seconds() < 3600:  # Don't repeat within 1 hour
+        if (_now_et() - last_sent).total_seconds() < 3600:  # Don't repeat within 1 hour
             return
 
     # Send delay alert
     if status['delayed'] and send_delay:
         print(f"   ⚠️  Train {train_number} delayed {status['delay_minutes']} min → Alerting {phone}")
         sms_service.send_delay_alert(phone, train_number, status['delay_minutes'])
-        sent_alerts[alert_key] = datetime.now()
+        sent_alerts[alert_key] = _now_et()
 
     # Send cancellation alert
     elif status['cancelled'] and send_delay:
         print(f"   🚫 Train {train_number} cancelled → Alerting {phone}")
         sms_service.send_cancellation_alert(phone, train_number)
-        sent_alerts[alert_key] = datetime.now()
+        sent_alerts[alert_key] = _now_et()
 
     # Send on-time alert (30 min before departure from the commuter's boarding station)
     elif status['on_time'] and send_ontime:
@@ -108,14 +116,14 @@ def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bo
             print(f"   ⚠️  Train {train_number} has no scheduled time")
             return
 
-        minutes_until = (scheduled - datetime.now()).total_seconds() / 60
+        minutes_until = (scheduled - _now_et()).total_seconds() / 60
 
         # Send alert if train departs in 25-35 minutes (catches the 30-min window)
         if 25 <= minutes_until <= 35:
             departure_time = scheduled.strftime('%I:%M %p')
             print(f"   ✅ Train {train_number} on time → Alerting {phone}")
             sms_service.send_ontime_alert(phone, train_number, departure_time)
-            sent_alerts[alert_key] = datetime.now()
+            sent_alerts[alert_key] = _now_et()
 
     else:
         print(f"   ℹ️  Train {train_number} status: {status['status']} (no alert needed)")
@@ -123,7 +131,7 @@ def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bo
 def cleanup_old_alerts():
     """Clean up old alert tracking (runs daily)"""
     print("🧹 Cleaning up old alert tracking...")
-    current_time = datetime.now()
+    current_time = _now_et()
     
     # Remove alerts older than 24 hours
     old_keys = [
@@ -141,7 +149,7 @@ def main():
     print("\n" + "="*60)
     print("🚂 NJ TRANSIT DELAY ALERTS - BACKGROUND WORKER")
     print("="*60)
-    print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Started at: {_now_et().strftime('%Y-%m-%d %H:%M:%S')} ET")
     print("Checking trains every 5 minutes...")
     print("Press Ctrl+C to stop")
     print("="*60 + "\n")
