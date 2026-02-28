@@ -96,8 +96,6 @@ class VerifyRequest(BaseModel):
     phone: str
     code: str
 
-class UnsubscribeRequest(BaseModel):
-    phone: str
 
 # API Endpoints
 
@@ -171,41 +169,6 @@ def get_subscription_status(phone: str):
     else:
         raise HTTPException(status_code=404, detail="Subscription not found")
 
-@app.post("/unsubscribe")
-def unsubscribe(request: UnsubscribeRequest):
-    """
-    Unsubscribe from alerts
-    1. Generate verification code
-    2. Send SMS
-    3. Return pending status (user confirms in next step)
-    """
-    try:
-        # Check if subscription exists
-        sub = get_subscription(request.phone)
-        
-        if not sub:
-            raise HTTPException(status_code=404, detail="Subscription not found")
-        
-        # For simplicity, just delete immediately
-        # In production, you'd want verification here too
-        deleted = delete_subscription(request.phone)
-        
-        if deleted:
-            sms_service.send_sms(
-                request.phone,
-                "You've been unsubscribed from NJ Transit Delay Alerts. Reply STOP to confirm."
-            )
-            return {
-                "status": "unsubscribed",
-                "message": "You've been unsubscribed from alerts"
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Failed to unsubscribe")
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/trains")
 def get_trains():
