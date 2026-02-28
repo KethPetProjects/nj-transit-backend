@@ -76,23 +76,29 @@ class SMSService:
         message = f"Your NJ Transit Alerts verification code is: {code}"
         return self.send_sms(to_number, message)
     
-    def send_delay_alert(self, to_number: str, train_number: str, delay_minutes: int) -> bool:
+    def send_delay_alert(self, to_number: str, train_number: str, delay_minutes: int,
+                         station_name: str = '') -> bool:
         """Send delay alert"""
-        message = f"⚠️ DELAY: Train {train_number} is delayed {delay_minutes} minutes."
+        station_str = f" from {station_name}" if station_name else ""
+        message = f"⚠️ DELAY: Train {train_number}{station_str} is delayed {delay_minutes} minutes."
         print(f"\n📱 SMS SENT (MOCK)\n   To: {to_number}\n   Message: {message}\n   ✓ Delivered (simulated)")
         self._send_ntfy(f"Train {train_number} Delayed", message, priority="high")
         return True
 
-    def send_cancellation_alert(self, to_number: str, train_number: str) -> bool:
+    def send_cancellation_alert(self, to_number: str, train_number: str,
+                                station_name: str = '') -> bool:
         """Send cancellation alert"""
-        message = f"🚫 CANCELLED: Train {train_number} has been cancelled. Check alternative trains."
+        station_str = f" from {station_name}" if station_name else ""
+        message = f"🚫 CANCELLED: Train {train_number}{station_str} has been cancelled. Check alternative trains."
         print(f"\n📱 SMS SENT (MOCK)\n   To: {to_number}\n   Message: {message}\n   ✓ Delivered (simulated)")
         self._send_ntfy(f"Train {train_number} Cancelled", message, priority="urgent")
         return True
 
-    def send_ontime_alert(self, to_number: str, train_number: str, departure_time: str) -> bool:
+    def send_ontime_alert(self, to_number: str, train_number: str, departure_time: str,
+                          station_name: str = '') -> bool:
         """Send on-time confirmation"""
-        message = f"✅ Train {train_number} is departing on time at {departure_time}. Have a great commute!"
+        station_str = f" from {station_name}" if station_name else ""
+        message = f"✅ Train {train_number} departing on time{station_str} at {departure_time}. Have a great commute!"
         print(f"\n📱 SMS SENT (MOCK)\n   To: {to_number}\n   Message: {message}\n   ✓ Delivered (simulated)")
         self._send_ntfy(f"Train {train_number} On Time", message, priority="default")
         return True

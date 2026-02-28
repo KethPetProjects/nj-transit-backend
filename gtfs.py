@@ -803,6 +803,19 @@ def get_train_origin_njt_code(train_number: str, query_date: Optional[date] = No
         return None
 
 
+def get_station_name(njt_code: str) -> Optional[str]:
+    """Return the display name for a NJT 2-char station code (e.g. 'PJ' → 'Princeton Jct.')."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('SELECT stop_name FROM gtfs_stops WHERE njt_code = %s LIMIT 1', (njt_code,))
+        result = c.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception:
+        return None
+
+
 def get_train_departure_at_station(train_number: str, station_code: str,
                                    query_date: Optional[date] = None) -> Optional[datetime]:
     """
