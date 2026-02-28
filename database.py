@@ -41,6 +41,9 @@ def init_db():
         ''')
         # Migration: add station column to existing tables
         c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS station TEXT DEFAULT ''")
+        # Migration: add ntfy_topic column and make phone nullable
+        c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS ntfy_topic TEXT")
+        c.execute("ALTER TABLE subscriptions ALTER COLUMN phone DROP NOT NULL")
         
         conn.commit()
         conn.close()
@@ -49,14 +52,25 @@ def init_db():
         print(f"❌ Database initialization failed: {e}")
         raise
 
-def save_subscription(phone: str, morning_train: str, evening_train: str,
-                     delay_alerts: bool = True, ontime_alerts: bool = True,
-                     station: str = '') -> str:
+def save_subscription(phone: Optional[str] = None, morning_train: str = '',
+                     evening_train: str = '', delay_alerts: bool = True,
+                     ontime_alerts: bool = True, station: str = '') -> dict:
     """
-    Save a new subscription (status: pending)
-    Returns verification code
+    Save a new subscription.
+    - Always generates a unique ntfy_topic for push notifications.
+    - Phone is optional. If provided, subscription starts as 'pending' (needs verification).
+    - If no phone, subscription is immediately 'active'.
+    Returns dict: {'ntfy_topic': str, 'verification_code': str or None}
     """
-    verification_code = str(random.randint(100000, 999999))
+    import secrets as _secrets
+    ntfy_topic = 'njtransit-' + _secrets.token_urlsafe(12)
+
+    if phone:
+        verification_code = str(random.randint(100000, 999999))
+        initial_status = 'pending'
+    else:
+        verification_code = None
+        initial_status = 'active'
 
     conn = get_connection()
     c = conn.cursor()
@@ -64,28 +78,36 @@ def save_subscription(phone: str, morning_train: str, evening_train: str,
     try:
         c.execute('''
             INSERT INTO subscriptions
-            (phone, morning_train, evening_train, delay_alerts, ontime_alerts, verification_code, status, station)
-            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
-        ''', (phone, morning_train, evening_train, delay_alerts, ontime_alerts, verification_code, station))
+            (phone, morning_train, evening_train, delay_alerts, ontime_alerts,
+             verification_code, status, station, ntfy_topic)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ''', (phone, morning_train, evening_train, delay_alerts, ontime_alerts,
+              verification_code, initial_status, station, ntfy_topic))
 
         conn.commit()
-        print(f"📝 Subscription saved for {phone} (pending verification)")
-        return verification_code
+        label = phone or 'no-phone'
+        print(f"📝 Subscription saved for {label} (topic: {ntfy_topic})")
+        return {'ntfy_topic': ntfy_topic, 'verification_code': verification_code}
 
     except psycopg2.IntegrityError:
-        # Phone already exists, update instead
+        # Phone already exists — update, keeping the existing ntfy_topic
         conn.rollback()
+        c.execute('SELECT ntfy_topic FROM subscriptions WHERE phone=%s', (phone,))
+        existing = c.fetchone()
+        if existing and existing[0]:
+            ntfy_topic = existing[0]  # keep so user's ntfy app subscription stays valid
+
         c.execute('''
             UPDATE subscriptions
             SET morning_train=%s, evening_train=%s, delay_alerts=%s, ontime_alerts=%s,
-                verification_code=%s, status='pending', updated_at=%s, station=%s
+                verification_code=%s, status=%s, updated_at=%s, station=%s
             WHERE phone=%s
         ''', (morning_train, evening_train, delay_alerts, ontime_alerts,
-              verification_code, datetime.now(), station, phone))
+              verification_code, initial_status, datetime.now(), station, phone))
 
         conn.commit()
-        print(f"📝 Subscription updated for {phone} (pending verification)")
-        return verification_code
+        print(f"📝 Subscription updated for {phone} (topic: {ntfy_topic})")
+        return {'ntfy_topic': ntfy_topic, 'verification_code': verification_code}
 
     finally:
         conn.close()
@@ -122,7 +144,7 @@ def get_active_subscriptions() -> List[Dict]:
     c = conn.cursor(cursor_factory=RealDictCursor)
     
     c.execute('''
-        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, station
+        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, station, ntfy_topic
         FROM subscriptions
         WHERE status='active'
     ''')
@@ -141,7 +163,7 @@ def get_subscription(phone: str) -> Optional[Dict]:
     c = conn.cursor(cursor_factory=RealDictCursor)
     
     c.execute('''
-        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, status, station
+        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, status, station, ntfy_topic
         FROM subscriptions
         WHERE phone=%s
     ''', (phone,))
@@ -167,6 +189,33 @@ def delete_subscription(phone: str) -> bool:
     if deleted:
         print(f"🗑️ Subscription deleted for {phone}")
     return deleted
+
+def get_subscription_by_topic(topic: str) -> Optional[Dict]:
+    """Get subscription by ntfy_topic"""
+    conn = get_connection()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, status, station, ntfy_topic
+        FROM subscriptions
+        WHERE ntfy_topic=%s
+    ''', (topic,))
+    result = c.fetchone()
+    conn.close()
+    return dict(result) if result else None
+
+
+def delete_subscription_by_topic(topic: str) -> bool:
+    """Delete a subscription by ntfy_topic (no verification needed — topic IS the token)"""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('DELETE FROM subscriptions WHERE ntfy_topic=%s', (topic,))
+    deleted = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    if deleted:
+        print(f"🗑️ Subscription deleted for topic {topic}")
+    return deleted
+
 
 def store_unsub_code(phone: str, code: str):
     """Store unsubscribe verification code for a phone number"""

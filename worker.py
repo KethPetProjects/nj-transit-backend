@@ -48,6 +48,9 @@ def check_subscriber_trains(sub: dict):
     phone = sub['phone']
     home_station = sub.get('station') or ''
 
+    ntfy_topic = sub.get('ntfy_topic') or None
+    manage_url = f"https://black-plant-0162ad510.4.azurestaticapps.net/?topic={ntfy_topic}" if ntfy_topic else None
+
     # Look up human-readable station names for notifications
     morning_station_name = ''
     evening_station_name = ''
@@ -70,7 +73,9 @@ def check_subscriber_trains(sub: dict):
             send_delay=sub['delay_alerts'],
             send_ontime=sub['ontime_alerts'],
             station=home_station,
-            station_name=morning_station_name
+            station_name=morning_station_name,
+            ntfy_topic=ntfy_topic,
+            manage_url=manage_url
         )
 
     # Evening train: train originates at NYC, so NJT API time is already correct
@@ -80,11 +85,14 @@ def check_subscriber_trains(sub: dict):
             train_number=sub['evening_train'],
             send_delay=sub['delay_alerts'],
             send_ontime=sub['ontime_alerts'],
-            station_name=evening_station_name
+            station_name=evening_station_name,
+            ntfy_topic=ntfy_topic,
+            manage_url=manage_url
         )
 
 def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bool,
-               station: str = '', station_name: str = ''):
+               station: str = '', station_name: str = '',
+               ntfy_topic: str = None, manage_url: str = None):
     """Check status of a specific train and send alerts if needed"""
 
     # Get train status from NJ Transit API
@@ -102,13 +110,15 @@ def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bo
     # Send delay alert
     if status['delayed'] and send_delay:
         print(f"   ⚠️  Train {train_number} delayed {status['delay_minutes']} min → Alerting {phone}")
-        sms_service.send_delay_alert(phone, train_number, status['delay_minutes'], station_name)
+        sms_service.send_delay_alert(phone, train_number, status['delay_minutes'], station_name,
+                                     ntfy_topic=ntfy_topic, manage_url=manage_url)
         sent_alerts[alert_key] = _now_et()
 
     # Send cancellation alert
     elif status['cancelled'] and send_delay:
         print(f"   🚫 Train {train_number} cancelled → Alerting {phone}")
-        sms_service.send_cancellation_alert(phone, train_number, station_name)
+        sms_service.send_cancellation_alert(phone, train_number, station_name,
+                                            ntfy_topic=ntfy_topic, manage_url=manage_url)
         sent_alerts[alert_key] = _now_et()
 
     # Send on-time alert (30 min before departure from the commuter's boarding station)
@@ -138,7 +148,8 @@ def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bo
         if 25 <= minutes_until <= 35:
             departure_time = scheduled.strftime('%I:%M %p')
             print(f"   ✅ Train {train_number} on time → Alerting {phone}")
-            sms_service.send_ontime_alert(phone, train_number, departure_time, station_name)
+            sms_service.send_ontime_alert(phone, train_number, departure_time, station_name,
+                                         ntfy_topic=ntfy_topic, manage_url=manage_url)
             sent_alerts[alert_key] = _now_et()
 
     else:

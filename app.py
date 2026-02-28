@@ -23,7 +23,9 @@ from database import (
     delete_subscription,
     get_active_subscriptions,
     store_unsub_code,
-    verify_unsub_code
+    verify_unsub_code,
+    get_subscription_by_topic,
+    delete_subscription_by_topic
 )
 from notifications import SMSService
 from njtransit import NJTransitAPI
@@ -85,8 +87,10 @@ def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
     return credentials.username
 
 # Request models
+FRONTEND_URL = "https://black-plant-0162ad510.4.azurestaticapps.net"
+
 class SubscribeRequest(BaseModel):
-    phone: str
+    phone: Optional[str] = None  # Optional — ntfy works without a phone number
     morning_train: str
     evening_train: str
     delay_alerts: bool = True
@@ -118,24 +122,44 @@ def subscribe(request: SubscribeRequest):
     3. Send SMS with code
     """
     try:
-        # Save subscription and get verification code
-        code = save_subscription(
-            phone=request.phone,
+        phone = request.phone.strip() if request.phone else None
+        result = save_subscription(
+            phone=phone,
             morning_train=request.morning_train,
             evening_train=request.evening_train,
             delay_alerts=request.delay_alerts,
             ontime_alerts=request.ontime_alerts,
             station=request.station
         )
-        
-        # Send verification code
-        sms_service.send_verification_code(request.phone, code)
-        
-        return {
-            "status": "pending",
-            "message": "Verification code sent to your phone"
-        }
-    
+
+        ntfy_topic = result['ntfy_topic']
+        manage_url = f"{FRONTEND_URL}/?topic={ntfy_topic}"
+
+        if phone and result['verification_code']:
+            # Phone provided — send verification code, subscription pending
+            sms_service.send_verification_code(phone, result['verification_code'])
+            return {
+                "status": "pending",
+                "message": "Verification code sent to your phone",
+                "ntfy_topic": ntfy_topic,
+                "manage_url": manage_url
+            }
+        else:
+            # No phone — immediately active, push via ntfy
+            sms_service._send_ntfy(
+                title="NJ Transit Alerts — You're subscribed!",
+                message=f"Train alerts are active. Tap to manage your subscription.",
+                priority="default",
+                topic=ntfy_topic,
+                click_url=manage_url
+            )
+            return {
+                "status": "active",
+                "message": "Subscription active! Subscribe to your ntfy topic to receive alerts.",
+                "ntfy_topic": ntfy_topic,
+                "manage_url": manage_url
+            }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -242,6 +266,37 @@ def unsubscribe_confirm(request: UnsubConfirmModel):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ========== MANAGE / UNSUBSCRIBE BY TOPIC ==========
+
+@app.get("/manage/{topic}")
+def manage_by_topic(topic: str):
+    """Get subscription details by ntfy topic (no auth — topic IS the token)"""
+    sub = get_subscription_by_topic(topic)
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    # Don't expose phone in response
+    return {
+        "morning_train": sub["morning_train"],
+        "evening_train": sub["evening_train"],
+        "station": sub["station"],
+        "delay_alerts": sub["delay_alerts"],
+        "ontime_alerts": sub["ontime_alerts"],
+        "ntfy_topic": sub["ntfy_topic"]
+    }
+
+
+class UnsubByTopicRequest(BaseModel):
+    topic: str
+
+@app.post("/unsubscribe/topic")
+def unsubscribe_by_topic(request: UnsubByTopicRequest):
+    """Unsubscribe by ntfy topic — no verification needed, topic is the proof of ownership"""
+    deleted = delete_subscription_by_topic(request.topic)
+    if deleted:
+        return {"status": "unsubscribed", "message": "You've been unsubscribed successfully."}
+    raise HTTPException(status_code=404, detail="Subscription not found")
+
 
 # ========== NOVA AI PROXY ==========
 

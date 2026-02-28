@@ -32,22 +32,28 @@ class SMSService:
         if self.ntfy_topic:
             print(f"   🔔 ntfy.sh push notifications enabled (topic: {self.ntfy_topic})")
 
-    def _send_ntfy(self, title: str, message: str, priority: str = "default") -> None:
-        """Send a push notification via ntfy.sh (best-effort, never raises)."""
-        if not self.ntfy_topic:
+    def _send_ntfy(self, title: str, message: str, priority: str = "default",
+                   topic: str = None, click_url: str = None) -> None:
+        """Send a push notification via ntfy.sh (best-effort, never raises).
+        Uses per-subscription topic if provided, falls back to global NTFY_TOPIC env var."""
+        effective_topic = topic or self.ntfy_topic
+        if not effective_topic:
             return
+        headers = {
+            "Title": title,
+            "Priority": priority,
+            "Tags": "train",
+        }
+        if click_url:
+            headers["Click"] = click_url
         try:
             requests.post(
-                f"{NTFY_BASE}/{self.ntfy_topic}",
+                f"{NTFY_BASE}/{effective_topic}",
                 data=message.encode("utf-8"),
-                headers={
-                    "Title": title,
-                    "Priority": priority,
-                    "Tags": "train",
-                },
+                headers=headers,
                 timeout=5
             )
-            print(f"   🔔 ntfy.sh notification sent")
+            print(f"   🔔 ntfy.sh notification sent (topic: {effective_topic})")
         except Exception as e:
             print(f"   ⚠️ ntfy.sh failed (non-critical): {e}")
 
@@ -77,30 +83,36 @@ class SMSService:
         return self.send_sms(to_number, message)
     
     def send_delay_alert(self, to_number: str, train_number: str, delay_minutes: int,
-                         station_name: str = '') -> bool:
+                         station_name: str = '', ntfy_topic: str = None,
+                         manage_url: str = None) -> bool:
         """Send delay alert"""
         station_str = f" from {station_name}" if station_name else ""
         message = f"⚠️ DELAY: Train {train_number}{station_str} is delayed {delay_minutes} minutes."
         print(f"\n📱 SMS SENT (MOCK)\n   To: {to_number}\n   Message: {message}\n   ✓ Delivered (simulated)")
-        self._send_ntfy(f"Train {train_number} Delayed", message, priority="high")
+        self._send_ntfy(f"Train {train_number} Delayed", message, priority="high",
+                        topic=ntfy_topic, click_url=manage_url)
         return True
 
     def send_cancellation_alert(self, to_number: str, train_number: str,
-                                station_name: str = '') -> bool:
+                                station_name: str = '', ntfy_topic: str = None,
+                                manage_url: str = None) -> bool:
         """Send cancellation alert"""
         station_str = f" from {station_name}" if station_name else ""
         message = f"🚫 CANCELLED: Train {train_number}{station_str} has been cancelled. Check alternative trains."
         print(f"\n📱 SMS SENT (MOCK)\n   To: {to_number}\n   Message: {message}\n   ✓ Delivered (simulated)")
-        self._send_ntfy(f"Train {train_number} Cancelled", message, priority="urgent")
+        self._send_ntfy(f"Train {train_number} Cancelled", message, priority="urgent",
+                        topic=ntfy_topic, click_url=manage_url)
         return True
 
     def send_ontime_alert(self, to_number: str, train_number: str, departure_time: str,
-                          station_name: str = '') -> bool:
+                          station_name: str = '', ntfy_topic: str = None,
+                          manage_url: str = None) -> bool:
         """Send on-time confirmation"""
         station_str = f" from {station_name}" if station_name else ""
         message = f"✅ Train {train_number} departing on time{station_str} at {departure_time}. Have a great commute!"
         print(f"\n📱 SMS SENT (MOCK)\n   To: {to_number}\n   Message: {message}\n   ✓ Delivered (simulated)")
-        self._send_ntfy(f"Train {train_number} On Time", message, priority="default")
+        self._send_ntfy(f"Train {train_number} On Time", message, priority="default",
+                        topic=ntfy_topic, click_url=manage_url)
         return True
 
 # Example usage:
