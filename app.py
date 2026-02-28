@@ -2,7 +2,7 @@
 FastAPI Web Server for NJ Transit Delay Alerts
 Handles subscription, verification, and unsubscribe
 """
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
@@ -12,6 +12,9 @@ import uvicorn
 import secrets
 import os
 import httpx
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from database import (
     save_subscription,
@@ -27,6 +30,11 @@ from njtransit import NJTransitAPI
 import gtfs
 
 app = FastAPI(title="NJ Transit Delay Alerts API")
+
+# Rate limiter — keyed by client IP
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 @app.on_event("startup")
@@ -277,14 +285,15 @@ class NovaChatRequest(BaseModel):
     system: str = ""
 
 @app.post("/nova/chat")
-async def nova_chat(request: NovaChatRequest):
+@limiter.limit("20/minute;100/hour")
+async def nova_chat(request: Request, body: NovaChatRequest):
     """
     Proxy endpoint for Nova AI — keeps Anthropic API key secure on backend
     """
     api_key = os.getenv('ANTHROPIC_API_KEY')
     if not api_key:
         raise HTTPException(status_code=503, detail="AI service not configured")
-    
+
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
@@ -297,8 +306,8 @@ async def nova_chat(request: NovaChatRequest):
                 json={
                     "model": "claude-haiku-4-5-20251001",
                     "max_tokens": 1000,
-                    "system": request.system,
-                    "messages": request.messages
+                    "system": body.system,
+                    "messages": body.messages
                 }
             )
             return response.json()
