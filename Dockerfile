@@ -5,6 +5,9 @@ FROM python:3.11-slim
 LABEL maintainer="ketharinath14@gmail.com"
 LABEL description="NJ Transit Delay Alerts - Backend Service"
 
+# Disable Python output buffering so logs appear immediately in Azure
+ENV PYTHONUNBUFFERED=1
+
 # Set working directory inside container
 WORKDIR /app
 
