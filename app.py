@@ -292,11 +292,18 @@ def manage_by_topic(topic: str):
     sub = get_subscription_by_topic(topic)
     if not sub:
         raise HTTPException(status_code=404, detail="Subscription not found")
-    # Don't expose phone in response
+    station_code = sub["station"] or ""
+    station_name = ""
+    if station_code:
+        try:
+            station_name = gtfs.get_station_name(station_code) or station_code
+        except Exception:
+            station_name = station_code
     return {
         "morning_train": sub["morning_train"],
         "evening_train": sub["evening_train"],
-        "station": sub["station"],
+        "station": station_code,
+        "station_name": station_name,
         "delay_alerts": sub["delay_alerts"],
         "ontime_alerts": sub["ontime_alerts"],
         "ntfy_topic": sub["ntfy_topic"]
