@@ -90,20 +90,21 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
         return {'ntfy_topic': ntfy_topic, 'verification_code': verification_code}
 
     except psycopg2.IntegrityError:
-        # Phone already exists — update, keeping the existing ntfy_topic
+        # Phone already exists — update, keeping the existing ntfy_topic if set
         conn.rollback()
         c.execute('SELECT ntfy_topic FROM subscriptions WHERE phone=%s', (phone,))
         existing = c.fetchone()
         if existing and existing[0]:
             ntfy_topic = existing[0]  # keep so user's ntfy app subscription stays valid
+        # else: ntfy_topic stays as the newly generated one — backfill it below
 
         c.execute('''
             UPDATE subscriptions
             SET morning_train=%s, evening_train=%s, delay_alerts=%s, ontime_alerts=%s,
-                verification_code=%s, status=%s, updated_at=%s, station=%s
+                verification_code=%s, status=%s, updated_at=%s, station=%s, ntfy_topic=%s
             WHERE phone=%s
         ''', (morning_train, evening_train, delay_alerts, ontime_alerts,
-              verification_code, initial_status, datetime.now(), station, phone))
+              verification_code, initial_status, datetime.now(), station, ntfy_topic, phone))
 
         conn.commit()
         print(f"📝 Subscription updated for {phone} (topic: {ntfy_topic})")
