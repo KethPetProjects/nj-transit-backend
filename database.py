@@ -34,10 +34,13 @@ def init_db():
                 ontime_alerts BOOLEAN DEFAULT TRUE,
                 verification_code TEXT,
                 status TEXT DEFAULT 'pending',
+                station TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # Migration: add station column to existing tables
+        c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS station TEXT DEFAULT ''")
         
         conn.commit()
         conn.close()
@@ -46,43 +49,44 @@ def init_db():
         print(f"❌ Database initialization failed: {e}")
         raise
 
-def save_subscription(phone: str, morning_train: str, evening_train: str, 
-                     delay_alerts: bool = True, ontime_alerts: bool = True) -> str:
+def save_subscription(phone: str, morning_train: str, evening_train: str,
+                     delay_alerts: bool = True, ontime_alerts: bool = True,
+                     station: str = '') -> str:
     """
     Save a new subscription (status: pending)
     Returns verification code
     """
     verification_code = str(random.randint(100000, 999999))
-    
+
     conn = get_connection()
     c = conn.cursor()
-    
+
     try:
         c.execute('''
-            INSERT INTO subscriptions 
-            (phone, morning_train, evening_train, delay_alerts, ontime_alerts, verification_code, status)
-            VALUES (%s, %s, %s, %s, %s, %s, 'pending')
-        ''', (phone, morning_train, evening_train, delay_alerts, ontime_alerts, verification_code))
-        
+            INSERT INTO subscriptions
+            (phone, morning_train, evening_train, delay_alerts, ontime_alerts, verification_code, status, station)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
+        ''', (phone, morning_train, evening_train, delay_alerts, ontime_alerts, verification_code, station))
+
         conn.commit()
         print(f"📝 Subscription saved for {phone} (pending verification)")
         return verification_code
-    
+
     except psycopg2.IntegrityError:
         # Phone already exists, update instead
         conn.rollback()
         c.execute('''
-            UPDATE subscriptions 
-            SET morning_train=%s, evening_train=%s, delay_alerts=%s, ontime_alerts=%s, 
-                verification_code=%s, status='pending', updated_at=%s
+            UPDATE subscriptions
+            SET morning_train=%s, evening_train=%s, delay_alerts=%s, ontime_alerts=%s,
+                verification_code=%s, status='pending', updated_at=%s, station=%s
             WHERE phone=%s
-        ''', (morning_train, evening_train, delay_alerts, ontime_alerts, 
-              verification_code, datetime.now(), phone))
-        
+        ''', (morning_train, evening_train, delay_alerts, ontime_alerts,
+              verification_code, datetime.now(), station, phone))
+
         conn.commit()
         print(f"📝 Subscription updated for {phone} (pending verification)")
         return verification_code
-    
+
     finally:
         conn.close()
 
@@ -118,8 +122,8 @@ def get_active_subscriptions() -> List[Dict]:
     c = conn.cursor(cursor_factory=RealDictCursor)
     
     c.execute('''
-        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts
-        FROM subscriptions 
+        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, station
+        FROM subscriptions
         WHERE status='active'
     ''')
     
@@ -137,8 +141,8 @@ def get_subscription(phone: str) -> Optional[Dict]:
     c = conn.cursor(cursor_factory=RealDictCursor)
     
     c.execute('''
-        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, status
-        FROM subscriptions 
+        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, status, station
+        FROM subscriptions
         WHERE phone=%s
     ''', (phone,))
     

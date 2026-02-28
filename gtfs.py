@@ -803,6 +803,68 @@ def get_train_origin_njt_code(train_number: str, query_date: Optional[date] = No
         return None
 
 
+def get_train_departure_at_station(train_number: str, station_code: str,
+                                   query_date: Optional[date] = None) -> Optional[datetime]:
+    """
+    Return the scheduled departure datetime for train_number at station_code.
+    Used by the worker to base the on-time alert window on the commuter's
+    boarding station, not the train's origin.
+    Returns None if not found.
+    """
+    if query_date is None:
+        query_date = date.today()
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+
+        c.execute(
+            'SELECT service_id FROM gtfs_calendar_dates WHERE date = %s AND exception_type = 1',
+            (query_date,)
+        )
+        service_ids = [r[0] for r in c.fetchall()]
+        if not service_ids:
+            conn.close()
+            return None
+
+        c.execute('SELECT stop_id FROM gtfs_stops WHERE njt_code = %s LIMIT 1', (station_code,))
+        stop_row = c.fetchone()
+        if not stop_row:
+            conn.close()
+            return None
+        stop_id = stop_row[0]
+
+        c.execute('''
+            SELECT st.departure_time
+            FROM gtfs_stop_times st
+            JOIN gtfs_trips t ON st.trip_id = t.trip_id
+            WHERE t.block_id = %s
+              AND t.service_id = ANY(%s)
+              AND st.stop_id = %s
+              AND st.pickup_type = 0
+            LIMIT 1
+        ''', (train_number, service_ids, stop_id))
+
+        result = c.fetchone()
+        conn.close()
+        if not result or not result[0]:
+            return None
+
+        parts = result[0].split(':')
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        seconds = int(parts[2]) if len(parts) > 2 else 0
+
+        dep_date = query_date
+        if hours >= 24:
+            dep_date = query_date + timedelta(days=hours // 24)
+            hours = hours % 24
+
+        return datetime(dep_date.year, dep_date.month, dep_date.day, hours, minutes, seconds)
+    except Exception as e:
+        print(f"⚠️ get_train_departure_at_station({train_number}, {station_code}): {e}")
+        return None
+
+
 def get_status() -> dict:
     """Return GTFS data status: last updated timestamp + record counts."""
     try:

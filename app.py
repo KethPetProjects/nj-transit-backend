@@ -91,6 +91,7 @@ class SubscribeRequest(BaseModel):
     evening_train: str
     delay_alerts: bool = True
     ontime_alerts: bool = True
+    station: str = ''  # 2-char NJT station code for home station (e.g. 'PJ')
 
 class VerifyRequest(BaseModel):
     phone: str
@@ -123,7 +124,8 @@ def subscribe(request: SubscribeRequest):
             morning_train=request.morning_train,
             evening_train=request.evening_train,
             delay_alerts=request.delay_alerts,
-            ontime_alerts=request.ontime_alerts
+            ontime_alerts=request.ontime_alerts,
+            station=request.station
         )
         
         # Send verification code

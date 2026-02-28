@@ -38,17 +38,19 @@ def check_trains():
 def check_subscriber_trains(sub: dict):
     """Check trains for a specific subscriber"""
     phone = sub['phone']
-    
-    # Check morning train
+    home_station = sub.get('station') or ''
+
+    # Morning train: alert fires based on departure from home station (not the train's origin)
     if sub['morning_train']:
         check_train(
             phone=phone,
             train_number=sub['morning_train'],
             send_delay=sub['delay_alerts'],
-            send_ontime=sub['ontime_alerts']
+            send_ontime=sub['ontime_alerts'],
+            station=home_station
         )
-    
-    # Check evening train
+
+    # Evening train: train originates at NYC, so NJT API time is already correct
     if sub['evening_train']:
         check_train(
             phone=phone,
@@ -57,51 +59,64 @@ def check_subscriber_trains(sub: dict):
             send_ontime=sub['ontime_alerts']
         )
 
-def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bool):
+def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bool,
+               station: str = ''):
     """Check status of a specific train and send alerts if needed"""
-    
+
     # Get train status from NJ Transit API
     status = nj_transit.get_train_status(train_number)
-    
+
     # Create unique key to track if we've already alerted
     alert_key = f"{phone}_{train_number}_{status['status']}"
-    
+
     # Check if we already sent this alert today
     if alert_key in sent_alerts:
         last_sent = sent_alerts[alert_key]
         if (datetime.now() - last_sent).total_seconds() < 3600:  # Don't repeat within 1 hour
             return
-    
+
     # Send delay alert
     if status['delayed'] and send_delay:
         print(f"   ⚠️  Train {train_number} delayed {status['delay_minutes']} min → Alerting {phone}")
         sms_service.send_delay_alert(phone, train_number, status['delay_minutes'])
         sent_alerts[alert_key] = datetime.now()
-    
+
     # Send cancellation alert
     elif status['cancelled'] and send_delay:
         print(f"   🚫 Train {train_number} cancelled → Alerting {phone}")
         sms_service.send_cancellation_alert(phone, train_number)
         sent_alerts[alert_key] = datetime.now()
-    
-    # Send on-time alert (30 min before departure)
+
+    # Send on-time alert (30 min before departure from the commuter's boarding station)
     elif status['on_time'] and send_ontime:
         scheduled = status['scheduled_departure']
-        
-        # Check if scheduled time is available
+
+        # If we know the commuter's boarding station, look up departure time there
+        # from GTFS rather than using the train's origin departure time.
+        # This ensures the 25-35 min window is relative to when THEY board, not
+        # when the train left Trenton / some upstream station.
+        if station:
+            try:
+                import gtfs as _gtfs
+                gtfs_time = _gtfs.get_train_departure_at_station(train_number, station)
+                if gtfs_time:
+                    scheduled = gtfs_time
+            except Exception as e:
+                print(f"   ⚠️  GTFS departure lookup failed for {train_number} at {station}: {e}")
+
         if scheduled is None:
             print(f"   ⚠️  Train {train_number} has no scheduled time")
             return
-        
+
         minutes_until = (scheduled - datetime.now()).total_seconds() / 60
-        
+
         # Send alert if train departs in 25-35 minutes (catches the 30-min window)
         if 25 <= minutes_until <= 35:
             departure_time = scheduled.strftime('%I:%M %p')
             print(f"   ✅ Train {train_number} on time → Alerting {phone}")
             sms_service.send_ontime_alert(phone, train_number, departure_time)
             sent_alerts[alert_key] = datetime.now()
-    
+
     else:
         print(f"   ℹ️  Train {train_number} status: {status['status']} (no alert needed)")
 
