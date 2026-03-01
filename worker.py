@@ -24,12 +24,20 @@ sms_service = SMSService()
 # Track what alerts we've already sent (to avoid duplicates)
 sent_alerts = {}
 
+ACTIVE_HOUR_START = 6   # 6 AM ET
+ACTIVE_HOUR_END   = 20  # 8 PM ET
+
 def check_trains():
     """
     Main function: Check all subscribed trains
-    Runs every 5 minutes
+    Runs every 5 minutes, but only between 6 AM and 8 PM ET.
     """
-    print(f"\n🔍 [{_now_et().strftime('%H:%M:%S')}] Checking trains...")
+    now = _now_et()
+    if not (ACTIVE_HOUR_START <= now.hour < ACTIVE_HOUR_END):
+        print(f"   ⏸  [{now.strftime('%H:%M')} ET] Outside active hours ({ACTIVE_HOUR_START} AM–{ACTIVE_HOUR_END - 12} PM) — skipping")
+        return
+
+    print(f"\n🔍 [{now.strftime('%H:%M:%S')}] Checking trains...")
     
     # Get all active subscriptions
     subscriptions = get_active_subscriptions()
