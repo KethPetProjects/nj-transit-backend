@@ -134,20 +134,30 @@ def subscribe(request: SubscribeRequest):
         )
 
         ntfy_topic = result['ntfy_topic']
+        returning = result['returning']
         manage_url = f"{FRONTEND_URL}/?topic={ntfy_topic}"
 
-        # Send welcome push via ntfy
-        sms_service._send_ntfy(
-            title="NJ Transit Alerts — You're subscribed!",
-            message="Train alerts are active. Tap to manage your subscription.",
-            priority="default",
-            topic=ntfy_topic,
-            click_url=manage_url
-        )
+        if returning:
+            sms_service._send_ntfy(
+                title="NJ Transit Alerts — Trains updated!",
+                message="Your train selections have been updated. Tap to view.",
+                priority="default",
+                topic=ntfy_topic,
+                click_url=manage_url
+            )
+        else:
+            sms_service._send_ntfy(
+                title="NJ Transit Alerts — You're subscribed!",
+                message="Train alerts are active. Tap to manage your subscription.",
+                priority="default",
+                topic=ntfy_topic,
+                click_url=manage_url
+            )
 
         return {
             "status": "active",
-            "message": "Subscription active! Set up the ntfy app to receive alerts.",
+            "returning": returning,
+            "message": "Trains updated!" if returning else "Subscription active! Set up the ntfy app to receive alerts.",
             "ntfy_topic": ntfy_topic,
             "manage_url": manage_url
         }

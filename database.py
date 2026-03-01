@@ -81,7 +81,7 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
         conn.commit()
         label = phone or 'no-phone'
         print(f"📝 Subscription saved for {label} (topic: {ntfy_topic})")
-        return {'ntfy_topic': ntfy_topic, 'verification_code': verification_code}
+        return {'ntfy_topic': ntfy_topic, 'returning': False}
 
     except psycopg2.IntegrityError:
         # Phone already exists — update, keeping the existing ntfy_topic if set
@@ -102,7 +102,7 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
 
         conn.commit()
         print(f"📝 Subscription updated for {phone} (topic: {ntfy_topic})")
-        return {'ntfy_topic': ntfy_topic, 'verification_code': verification_code}
+        return {'ntfy_topic': ntfy_topic, 'returning': True}
 
     finally:
         conn.close()
