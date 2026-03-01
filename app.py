@@ -303,6 +303,27 @@ def unsubscribe_by_phone(request: UnsubByPhoneRequest):
     raise HTTPException(status_code=404, detail="No subscription found for that number")
 
 
+# ========== UNSUBSCRIBE WITH TOPIC VERIFICATION ==========
+
+class UnsubVerifyRequest(BaseModel):
+    phone: str
+    topic: str
+
+@app.post("/unsubscribe/verify")
+def unsubscribe_verify(request: UnsubVerifyRequest):
+    """Unsubscribe by phone + ntfy topic — both must match (topic acts as ownership proof)"""
+    phone = '+1' + request.phone.replace('+1', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+    sub = get_subscription(phone)
+    if not sub:
+        raise HTTPException(status_code=404, detail="No subscription found for that number")
+    if sub.get('ntfy_topic') != request.topic.strip():
+        raise HTTPException(status_code=403, detail="Topic code doesn't match. Check your ntfy app for the correct topic name.")
+    deleted = delete_subscription(phone)
+    if deleted:
+        return {"status": "unsubscribed", "message": "You've been unsubscribed successfully."}
+    raise HTTPException(status_code=500, detail="Failed to unsubscribe")
+
+
 # ========== MANAGE / UNSUBSCRIBE BY TOPIC ==========
 
 @app.get("/manage/{topic}")
