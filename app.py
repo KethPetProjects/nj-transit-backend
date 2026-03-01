@@ -140,7 +140,7 @@ def subscribe(request: SubscribeRequest):
 
         if reactivated:
             sms_service._send_ntfy(
-                title="NJ Transit Alerts — Welcome back!",
+                title="NJ Transit Alerts - Welcome back!",
                 message="Your alerts are active again. Your ntfy topic is the same as before.",
                 priority="default",
                 topic=ntfy_topic,
@@ -148,7 +148,7 @@ def subscribe(request: SubscribeRequest):
             )
         elif returning:
             sms_service._send_ntfy(
-                title="NJ Transit Alerts — Trains updated!",
+                title="NJ Transit Alerts - Trains updated!",
                 message="Your train selections have been updated. Tap to view.",
                 priority="default",
                 topic=ntfy_topic,
@@ -156,7 +156,7 @@ def subscribe(request: SubscribeRequest):
             )
         else:
             sms_service._send_ntfy(
-                title="NJ Transit Alerts — You're subscribed!",
+                title="NJ Transit Alerts - You're subscribed!",
                 message="Train alerts are active. Tap to manage your subscription.",
                 priority="default",
                 topic=ntfy_topic,
@@ -326,7 +326,7 @@ def unsubscribe_send_code(request: UnsubRequestModel):
     code = str(random.randint(100000, 999999))
     store_unsub_code(phone, code)
     sms_service._send_ntfy(
-        title="NJ Transit Alerts — Unsubscribe Code",
+        title="NJ Transit Alerts - Unsubscribe Code",
         message=f"Your unsubscribe code is: {code}",
         priority="high",
         topic=sub['ntfy_topic']
