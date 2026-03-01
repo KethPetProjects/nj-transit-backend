@@ -90,7 +90,7 @@ def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
 FRONTEND_URL = "https://black-plant-0162ad510.4.azurestaticapps.net"
 
 class SubscribeRequest(BaseModel):
-    phone: Optional[str] = None  # Optional — ntfy works without a phone number
+    phone: str  # Required — used as unique identifier
     morning_train: str
     evening_train: str
     delay_alerts: bool = True
@@ -116,13 +116,14 @@ def read_root():
 @app.post("/subscribe")
 def subscribe(request: SubscribeRequest):
     """
-    Subscribe to train alerts
-    1. Save subscription (pending)
-    2. Generate verification code
-    3. Send SMS with code
+    Subscribe to train alerts.
+    Phone is required as unique identifier. Subscription is immediately active.
     """
     try:
-        phone = request.phone.strip() if request.phone else None
+        phone = request.phone.strip()
+        if not phone:
+            raise HTTPException(status_code=400, detail="Phone number is required")
+
         result = save_subscription(
             phone=phone,
             morning_train=request.morning_train,
@@ -135,31 +136,24 @@ def subscribe(request: SubscribeRequest):
         ntfy_topic = result['ntfy_topic']
         manage_url = f"{FRONTEND_URL}/?topic={ntfy_topic}"
 
-        if phone and result['verification_code']:
-            # Phone provided — send verification code, subscription pending
-            sms_service.send_verification_code(phone, result['verification_code'])
-            return {
-                "status": "pending",
-                "message": "Verification code sent to your phone",
-                "ntfy_topic": ntfy_topic,
-                "manage_url": manage_url
-            }
-        else:
-            # No phone — immediately active, push via ntfy
-            sms_service._send_ntfy(
-                title="NJ Transit Alerts — You're subscribed!",
-                message=f"Train alerts are active. Tap to manage your subscription.",
-                priority="default",
-                topic=ntfy_topic,
-                click_url=manage_url
-            )
-            return {
-                "status": "active",
-                "message": "Subscription active! Subscribe to your ntfy topic to receive alerts.",
-                "ntfy_topic": ntfy_topic,
-                "manage_url": manage_url
-            }
+        # Send welcome push via ntfy
+        sms_service._send_ntfy(
+            title="NJ Transit Alerts — You're subscribed!",
+            message="Train alerts are active. Tap to manage your subscription.",
+            priority="default",
+            topic=ntfy_topic,
+            click_url=manage_url
+        )
 
+        return {
+            "status": "active",
+            "message": "Subscription active! Set up the ntfy app to receive alerts.",
+            "ntfy_topic": ntfy_topic,
+            "manage_url": manage_url
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -283,6 +277,21 @@ def unsubscribe_confirm(request: UnsubConfirmModel):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ========== UNSUBSCRIBE BY PHONE (no verification) ==========
+
+class UnsubByPhoneRequest(BaseModel):
+    phone: str
+
+@app.post("/unsubscribe/by-phone")
+def unsubscribe_by_phone(request: UnsubByPhoneRequest):
+    """Unsubscribe by phone number — no code needed, phone is the identifier"""
+    phone = '+1' + request.phone.replace('+1', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+    deleted = delete_subscription(phone)
+    if deleted:
+        return {"status": "unsubscribed", "message": "You've been unsubscribed successfully."}
+    raise HTTPException(status_code=404, detail="No subscription found for that number")
+
 
 # ========== MANAGE / UNSUBSCRIBE BY TOPIC ==========
 

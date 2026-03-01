@@ -58,19 +58,13 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
     """
     Save a new subscription.
     - Always generates a unique ntfy_topic for push notifications.
-    - Phone is optional. If provided, subscription starts as 'pending' (needs verification).
-    - If no phone, subscription is immediately 'active'.
-    Returns dict: {'ntfy_topic': str, 'verification_code': str or None}
+    - Phone is required. Subscription is immediately 'active' — no verification step.
+    Returns dict: {'ntfy_topic': str}
     """
     import secrets as _secrets
     ntfy_topic = 'njtransit-' + _secrets.token_urlsafe(12)
-
-    if phone:
-        verification_code = str(random.randint(100000, 999999))
-        initial_status = 'pending'
-    else:
-        verification_code = None
-        initial_status = 'active'
+    verification_code = None
+    initial_status = 'active'
 
     conn = get_connection()
     c = conn.cursor()
