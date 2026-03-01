@@ -135,9 +135,18 @@ def subscribe(request: SubscribeRequest):
 
         ntfy_topic = result['ntfy_topic']
         returning = result['returning']
+        reactivated = result.get('reactivated', False)
         manage_url = f"{FRONTEND_URL}/?topic={ntfy_topic}"
 
-        if returning:
+        if reactivated:
+            sms_service._send_ntfy(
+                title="NJ Transit Alerts — Welcome back!",
+                message="Your alerts are active again. Your ntfy topic is the same as before.",
+                priority="default",
+                topic=ntfy_topic,
+                click_url=manage_url
+            )
+        elif returning:
             sms_service._send_ntfy(
                 title="NJ Transit Alerts — Trains updated!",
                 message="Your train selections have been updated. Tap to view.",
@@ -157,7 +166,8 @@ def subscribe(request: SubscribeRequest):
         return {
             "status": "active",
             "returning": returning,
-            "message": "Trains updated!" if returning else "Subscription active! Set up the ntfy app to receive alerts.",
+            "reactivated": reactivated,
+            "message": "Welcome back!" if reactivated else "Trains updated!" if returning else "Subscription active! Set up the ntfy app to receive alerts.",
             "ntfy_topic": ntfy_topic,
             "manage_url": manage_url
         }
@@ -314,8 +324,8 @@ def unsubscribe_verify(request: UnsubVerifyRequest):
     """Unsubscribe by phone + ntfy topic — both must match (topic acts as ownership proof)"""
     phone = '+1' + request.phone.replace('+1', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
     sub = get_subscription(phone)
-    if not sub:
-        raise HTTPException(status_code=404, detail="No subscription found for that number")
+    if not sub or sub.get('status') == 'inactive':
+        raise HTTPException(status_code=404, detail="No active subscription found for that number")
     if sub.get('ntfy_topic') != request.topic.strip():
         raise HTTPException(status_code=403, detail="Topic code doesn't match. Check your ntfy app for the correct topic name.")
     deleted = delete_subscription(phone)

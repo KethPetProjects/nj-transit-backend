@@ -81,13 +81,14 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
         conn.commit()
         label = phone or 'no-phone'
         print(f"📝 Subscription saved for {label} (topic: {ntfy_topic})")
-        return {'ntfy_topic': ntfy_topic, 'returning': False}
+        return {'ntfy_topic': ntfy_topic, 'returning': False, 'reactivated': False}
 
     except psycopg2.IntegrityError:
         # Phone already exists — update, keeping the existing ntfy_topic if set
         conn.rollback()
-        c.execute('SELECT ntfy_topic FROM subscriptions WHERE phone=%s', (phone,))
+        c.execute('SELECT ntfy_topic, status FROM subscriptions WHERE phone=%s', (phone,))
         existing = c.fetchone()
+        reactivated = existing and existing[1] == 'inactive'
         if existing and existing[0]:
             ntfy_topic = existing[0]  # keep so user's ntfy app subscription stays valid
         # else: ntfy_topic stays as the newly generated one — backfill it below
@@ -101,8 +102,9 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
               verification_code, initial_status, datetime.now(), station, ntfy_topic, phone))
 
         conn.commit()
-        print(f"📝 Subscription updated for {phone} (topic: {ntfy_topic})")
-        return {'ntfy_topic': ntfy_topic, 'returning': True}
+        action = 'reactivated' if reactivated else 'updated'
+        print(f"📝 Subscription {action} for {phone} (topic: {ntfy_topic})")
+        return {'ntfy_topic': ntfy_topic, 'returning': True, 'reactivated': bool(reactivated)}
 
     finally:
         conn.close()
@@ -171,18 +173,19 @@ def get_subscription(phone: str) -> Optional[Dict]:
     return None
 
 def delete_subscription(phone: str) -> bool:
-    """Delete a subscription"""
+    """Soft-delete a subscription (sets status=inactive, preserves ntfy_topic for re-subscribe)"""
     conn = get_connection()
     c = conn.cursor()
-    
-    c.execute('DELETE FROM subscriptions WHERE phone=%s', (phone,))
+
+    c.execute("UPDATE subscriptions SET status='inactive', updated_at=%s WHERE phone=%s AND status='active'",
+              (datetime.now(), phone))
     deleted = c.rowcount > 0
-    
+
     conn.commit()
     conn.close()
-    
+
     if deleted:
-        print(f"🗑️ Subscription deleted for {phone}")
+        print(f"🗑️ Subscription deactivated for {phone}")
     return deleted
 
 def get_subscription_by_topic(topic: str) -> Optional[Dict]:
@@ -200,15 +203,16 @@ def get_subscription_by_topic(topic: str) -> Optional[Dict]:
 
 
 def delete_subscription_by_topic(topic: str) -> bool:
-    """Delete a subscription by ntfy_topic (no verification needed — topic IS the token)"""
+    """Soft-delete a subscription by ntfy_topic (preserves topic for re-subscribe)"""
     conn = get_connection()
     c = conn.cursor()
-    c.execute('DELETE FROM subscriptions WHERE ntfy_topic=%s', (topic,))
+    c.execute("UPDATE subscriptions SET status='inactive', updated_at=%s WHERE ntfy_topic=%s AND status='active'",
+              (datetime.now(), topic))
     deleted = c.rowcount > 0
     conn.commit()
     conn.close()
     if deleted:
-        print(f"🗑️ Subscription deleted for topic {topic}")
+        print(f"🗑️ Subscription deactivated for topic {topic}")
     return deleted
 
 
