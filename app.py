@@ -313,21 +313,44 @@ def unsubscribe_by_phone(request: UnsubByPhoneRequest):
     raise HTTPException(status_code=404, detail="No subscription found for that number")
 
 
-# ========== UNSUBSCRIBE WITH TOPIC VERIFICATION ==========
+# ========== UNSUBSCRIBE WITH NTFY CODE VERIFICATION ==========
 
-class UnsubVerifyRequest(BaseModel):
-    phone: str
-    topic: str
-
-@app.post("/unsubscribe/verify")
-def unsubscribe_verify(request: UnsubVerifyRequest):
-    """Unsubscribe by phone + ntfy topic — both must match (topic acts as ownership proof)"""
+@app.post("/unsubscribe/send-code")
+def unsubscribe_send_code(request: UnsubRequestModel):
+    """Send a 6-digit code via ntfy to prove ownership — only the subscriber will receive it"""
+    import random
     phone = '+1' + request.phone.replace('+1', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
     sub = get_subscription(phone)
     if not sub or sub.get('status') == 'inactive':
         raise HTTPException(status_code=404, detail="No active subscription found for that number")
-    if sub.get('ntfy_topic') != request.topic.strip():
-        raise HTTPException(status_code=403, detail="Topic code doesn't match. Check your ntfy app for the correct topic name.")
+    code = str(random.randint(100000, 999999))
+    store_unsub_code(phone, code)
+    sms_service._send_ntfy(
+        title="NJ Transit Alerts — Unsubscribe Code",
+        message=f"Your unsubscribe code is: {code}",
+        priority="high",
+        topic=sub['ntfy_topic']
+    )
+    return {
+        "status": "code_sent",
+        "morning_train": sub['morning_train'],
+        "evening_train": sub['evening_train']
+    }
+
+
+class UnsubVerifyRequest(BaseModel):
+    phone: str
+    code: str
+
+@app.post("/unsubscribe/verify")
+def unsubscribe_verify(request: UnsubVerifyRequest):
+    """Verify 6-digit code sent to ntfy, then unsubscribe"""
+    phone = '+1' + request.phone.replace('+1', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+    sub = get_subscription(phone)
+    if not sub or sub.get('status') == 'inactive':
+        raise HTTPException(status_code=404, detail="No active subscription found for that number")
+    if not verify_unsub_code(phone, request.code):
+        raise HTTPException(status_code=403, detail="Invalid code. Check your ntfy notification and try again.")
     deleted = delete_subscription(phone)
     if deleted:
         return {"status": "unsubscribed", "message": "You've been unsubscribed successfully."}
