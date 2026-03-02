@@ -494,6 +494,23 @@ def admin_gtfs_refresh(username: str = Depends(verify_admin)):
     gtfs.load_or_refresh_background()
     return {"status": "refresh_started", "message": "GTFS refresh triggered in background — check logs for progress"}
 
+
+@app.get("/admin/test/station-msg")
+def admin_test_station_msg(station: str = "NP", username: str = Depends(verify_admin)):
+    """Admin: Raw getStationMSG response — for exploring the alert format. Default station: NP (Newark Penn)."""
+    import requests as _requests
+    token = nj_transit.get_token()
+    if not token:
+        raise HTTPException(status_code=503, detail="Could not get NJT token")
+    resp = _requests.post(
+        f"{nj_transit.base_url}/getStationMSG",
+        files={
+            'token': (None, token),
+            'station': (None, station),
+        }
+    )
+    return {"station": station, "status_code": resp.status_code, "raw": resp.json()}
+
 # ================================================
 
 if __name__ == "__main__":
