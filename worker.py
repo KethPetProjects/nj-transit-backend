@@ -1,6 +1,6 @@
 """
-Background Worker - Checks trains every 5 minutes
-Sends alerts for delays and on-time confirmations
+Background Worker - Checks trains every 2 minutes
+Sends alerts for delays, on-time confirmations, and track assignments
 """
 import schedule
 import time
@@ -24,13 +24,16 @@ sms_service = SMSService()
 # Track what alerts we've already sent (to avoid duplicates)
 sent_alerts = {}
 
+# Track last known track assignment per (phone, train) — notify on first assignment
+last_track = {}
+
 ACTIVE_HOUR_START = 6   # 6 AM ET
 ACTIVE_HOUR_END   = 20  # 8 PM ET
 
 def check_trains():
     """
     Main function: Check all subscribed trains
-    Runs every 5 minutes, but only between 6 AM and 8 PM ET.
+    Runs every 2 minutes, but only between 6 AM and 8 PM ET.
     """
     now = _now_et()
     if not (ACTIVE_HOUR_START <= now.hour < ACTIVE_HOUR_END):
@@ -106,6 +109,27 @@ def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bo
     # Get train status from NJ Transit API
     status = nj_transit.get_train_status(train_number)
 
+    # Track notification — fire once when track is first assigned
+    track = status.get('track', '').strip()
+    track_key = f"{phone}_{train_number}"
+    prev_track = last_track.get(track_key, '')
+    if track and track != prev_track and ntfy_topic:
+        last_track[track_key] = track
+        departure_time = ''
+        if status.get('scheduled_departure'):
+            departure_time = f" | Departs {status['scheduled_departure'].strftime('%I:%M %p')}"
+        loc = f" at {station_name}" if station_name else ''
+        print(f"   🚉 Train {train_number} assigned track {track}{loc} → Alerting {phone}")
+        sms_service._send_ntfy(
+            title=f"Train {train_number} - Track {track}",
+            message=f"Track {track} assigned{loc}{departure_time}",
+            priority="default",
+            topic=ntfy_topic,
+            click_url=manage_url
+        )
+    elif not track and prev_track:
+        last_track[track_key] = ''  # track was cleared (reassignment pending)
+
     # Create unique key to track if we've already alerted
     alert_key = f"{phone}_{train_number}_{status['status']}"
 
@@ -164,20 +188,22 @@ def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bo
         print(f"   ℹ️  Train {train_number} status: {status['status']} (no alert needed)")
 
 def cleanup_old_alerts():
-    """Clean up old alert tracking (runs daily)"""
+    """Clean up old alert tracking and track assignments (runs daily)"""
     print("🧹 Cleaning up old alert tracking...")
     current_time = _now_et()
-    
+
     # Remove alerts older than 24 hours
     old_keys = [
         key for key, timestamp in sent_alerts.items()
         if (current_time - timestamp).total_seconds() > 86400  # 24 hours
     ]
-    
     for key in old_keys:
         del sent_alerts[key]
-    
-    print(f"   Removed {len(old_keys)} old alert(s)")
+
+    # Reset track assignments at midnight so track notifications fire fresh each day
+    last_track.clear()
+
+    print(f"   Removed {len(old_keys)} old alert(s), reset track assignments")
 
 def main():
     """Main worker loop"""
@@ -185,12 +211,12 @@ def main():
     print("🚂 NJ TRANSIT DELAY ALERTS - BACKGROUND WORKER")
     print("="*60)
     print(f"Started at: {_now_et().strftime('%Y-%m-%d %H:%M:%S')} ET")
-    print("Checking trains every 5 minutes...")
+    print("Checking trains every 2 minutes...")
     print("Press Ctrl+C to stop")
     print("="*60 + "\n")
-    
+
     # Schedule jobs
-    schedule.every(5).minutes.do(check_trains)
+    schedule.every(2).minutes.do(check_trains)
     schedule.every().day.at("00:00").do(cleanup_old_alerts)
     
     # Run immediately on start
