@@ -205,6 +205,25 @@ class NJTransitAPI:
             ]
         }
     
+    def get_service_alerts(self, station: str = 'NP') -> list:
+        """Fetch service alerts from getStationMSG. Returns raw list of alert dicts."""
+        if not self.username or not self.password:
+            return []
+        token = self.get_token()
+        if not token:
+            return []
+        try:
+            response = requests.post(
+                f"{self.base_url}/getStationMSG",
+                files={'token': (None, token), 'station': (None, station)}
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result if isinstance(result, list) else []
+        except Exception as e:
+            print(f"⚠️ getStationMSG error: {e}")
+            return []
+
     def get_train_status(self, train_number: str) -> Dict:
         """
         Get train status from NJ Transit API

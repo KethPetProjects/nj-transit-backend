@@ -495,21 +495,28 @@ def admin_gtfs_refresh(username: str = Depends(verify_admin)):
     return {"status": "refresh_started", "message": "GTFS refresh triggered in background — check logs for progress"}
 
 
-@app.get("/admin/test/station-msg")
-def admin_test_station_msg(station: str = "NP", username: str = Depends(verify_admin)):
-    """Admin: Raw getStationMSG response — for exploring the alert format. Default station: NP (Newark Penn)."""
-    import requests as _requests
-    token = nj_transit.get_token()
-    if not token:
-        raise HTTPException(status_code=503, detail="Could not get NJT token")
-    resp = _requests.post(
-        f"{nj_transit.base_url}/getStationMSG",
-        files={
-            'token': (None, token),
-            'station': (None, station),
-        }
-    )
-    return {"station": station, "status_code": resp.status_code, "raw": resp.json()}
+# ========== SERVICE ALERTS FEATURE FLAG ==========
+
+@app.get("/admin/service-alerts/status")
+def service_alerts_status(username: str = Depends(verify_admin)):
+    """Admin: Check whether system-wide service alert broadcasts are enabled."""
+    from cache import cache_get as _cache_get
+    enabled = _cache_get('service_alerts_enabled')
+    return {"service_alerts_enabled": bool(enabled)}
+
+@app.post("/admin/service-alerts/enable")
+def service_alerts_enable(username: str = Depends(verify_admin)):
+    """Admin: Enable system-wide service alert broadcasts."""
+    from cache import cache_set as _cache_set
+    _cache_set('service_alerts_enabled', True, ttl_hours=8760)  # 1 year
+    return {"service_alerts_enabled": True, "message": "Service alerts enabled"}
+
+@app.post("/admin/service-alerts/disable")
+def service_alerts_disable(username: str = Depends(verify_admin)):
+    """Admin: Disable system-wide service alert broadcasts (use during heavy dev)."""
+    from cache import cache_set as _cache_set
+    _cache_set('service_alerts_enabled', False, ttl_hours=8760)
+    return {"service_alerts_enabled": False, "message": "Service alerts disabled"}
 
 # ================================================
 

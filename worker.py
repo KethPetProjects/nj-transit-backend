@@ -4,11 +4,13 @@ Sends alerts for delays, on-time confirmations, and track assignments
 """
 import schedule
 import time
-from datetime import datetime, timedelta
+import hashlib
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from database import get_active_subscriptions
 from njtransit import NJTransitAPI
 from notifications import SMSService
+from cache import cache_get
 
 # Container runs in UTC but all NJT/GTFS times are Eastern — use Eastern throughout
 EASTERN = ZoneInfo('America/New_York')
@@ -27,8 +29,76 @@ sent_alerts = {}
 # Track last known track assignment per (phone, train) — notify on first assignment
 last_track = {}
 
+# Track service alerts already sent this session (dedup)
+sent_service_alerts = set()
+
 ACTIVE_HOUR_START = 6   # 6 AM ET
 ACTIVE_HOUR_END   = 20  # 8 PM ET
+
+def _parse_utc_date(date_str: str):
+    """Parse MSG_PUBDATE_UTC string (e.g. '3/2/2026 9:52:00 PM') to UTC datetime."""
+    try:
+        return datetime.strptime(date_str, '%m/%d/%Y %I:%M:%S %p').replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def check_service_alerts():
+    """
+    Check NJT getStationMSG for system-wide service alerts and push to all subscribers.
+    Gated by 'service_alerts_enabled' flag in DB cache — off by default.
+    Only sends alerts published within the last 2 hours (prevents re-sending persistent alerts).
+    """
+    if not cache_get('service_alerts_enabled'):
+        return
+
+    alerts = nj_transit.get_service_alerts('NP')
+    if not alerts:
+        return
+
+    subscriptions = get_active_subscriptions()
+    if not subscriptions:
+        return
+
+    now_utc = datetime.now(timezone.utc)
+
+    for alert in alerts:
+        # System-wide only — line-scoped alerts have a non-blank MSG_LINE_SCOPE
+        if alert.get('MSG_LINE_SCOPE', '').strip():
+            continue
+
+        # Freshness check — skip alerts older than 2 hours
+        pub_date = _parse_utc_date(alert.get('MSG_PUBDATE_UTC', ''))
+        if not pub_date or (now_utc - pub_date).total_seconds() > 7200:
+            continue
+
+        # Dedup key — prefer MSG_ID, fall back to text hash
+        msg_id = alert.get('MSG_ID', '').strip()
+        dedup_key = f"svc_{msg_id}" if msg_id else \
+                    f"svc_{hashlib.md5(alert.get('MSG_TEXT','')[:120].encode()).hexdigest()}"
+
+        if dedup_key in sent_service_alerts:
+            continue
+
+        msg_text = alert.get('MSG_TEXT', '').strip()
+        msg_url = alert.get('MSG_URL', '').strip() or None
+        if not msg_text:
+            continue
+
+        print(f"   📢 Service alert → sending to {len(subscriptions)} subscriber(s): {msg_text[:80]}...")
+        for sub in subscriptions:
+            ntfy_topic = sub.get('ntfy_topic')
+            if ntfy_topic:
+                sms_service._send_ntfy(
+                    title="NJ Transit Service Alert",
+                    message=msg_text,
+                    priority="high",
+                    topic=ntfy_topic,
+                    click_url=msg_url
+                )
+
+        sent_service_alerts.add(dedup_key)
+
 
 def check_trains():
     """
@@ -50,7 +120,9 @@ def check_trains():
         return
     
     print(f"   Found {len(subscriptions)} active subscription(s)")
-    
+
+    check_service_alerts()
+
     for sub in subscriptions:
         check_subscriber_trains(sub)
 
@@ -200,10 +272,11 @@ def cleanup_old_alerts():
     for key in old_keys:
         del sent_alerts[key]
 
-    # Reset track assignments at midnight so track notifications fire fresh each day
+    # Reset track assignments and service alert dedup at midnight
     last_track.clear()
+    sent_service_alerts.clear()
 
-    print(f"   Removed {len(old_keys)} old alert(s), reset track assignments")
+    print(f"   Removed {len(old_keys)} old alert(s), reset track + service alert state")
 
 def main():
     """Main worker loop"""
