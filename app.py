@@ -155,7 +155,7 @@ def subscribe(request: SubscribeRequest):
             # Cache the code with a 10-minute TTL so old codes can't be replayed later
             cache_set(f"change_code_valid_{phone}", code, ttl_hours=10/60)
             sms_service._send_ntfy(
-                title="NJ Transit Alerts — Verify Change",
+                title="NJ Transit Alerts - Verify Change",
                 message=f"Your update code is {code}. Enter it in the app to confirm your train change.",
                 priority="high",
                 topic=existing['ntfy_topic']
