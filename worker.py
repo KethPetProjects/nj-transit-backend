@@ -205,6 +205,13 @@ def check_subscriber_trains(sub: dict):
         )
 
 
+def _dep_str(scheduled) -> str:
+    """Format a scheduled departure as '(9:36 AM)' for use in notification titles."""
+    if not scheduled:
+        return ''
+    return f"({scheduled.strftime('%I:%M %p').lstrip('0')})"
+
+
 def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: bool,
                       station: str = '', station_name: str = '',
                       ntfy_topic: str = None, manage_url: str = None):
@@ -261,9 +268,10 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
             actual_str = f" (now {actual.strftime('%I:%M %p')})" if actual else ''
             loc = f" at {station_name}" if station_name else ''
             msg = f"Delayed {status['delay_minutes']} min{actual_str}{loc}{ctx}"
+            sched_label = _dep_str(status.get('scheduled_departure'))
             print(f"   ⚠️  Train {train_number} delayed {status['delay_minutes']} min → Alerting {phone}")
             sms_service._send_ntfy(
-                title=f"Train {train_number} Delayed - {status['delay_minutes']} min",
+                title=f"Train {train_number} {sched_label} Delayed - {status['delay_minutes']} min",
                 message=msg, priority="high",
                 topic=ntfy_topic, click_url=manage_url
             )
@@ -273,9 +281,10 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
         elif status['cancelled'] and send_delay:
             loc = f" at {station_name}" if station_name else ''
             msg = f"Cancelled{loc}{ctx}"
+            sched_label = _dep_str(status.get('scheduled_departure'))
             print(f"   🚫 Train {train_number} cancelled → Alerting {phone}")
             sms_service._send_ntfy(
-                title=f"Train {train_number} Cancelled",
+                title=f"Train {train_number} {sched_label} Cancelled",
                 message=msg, priority="urgent",
                 topic=ntfy_topic, click_url=manage_url
             )
@@ -304,7 +313,7 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
                 msg = f"On time — departs {dep_time}{loc}{ctx}"
                 print(f"   ✅ Train {train_number} on time → Alerting {phone}")
                 sms_service._send_ntfy(
-                    title=f"Train {train_number} On Time",
+                    title=f"Train {train_number} {_dep_str(scheduled)} On Time",
                     message=msg, priority="default",
                     topic=ntfy_topic, click_url=manage_url
                 )
