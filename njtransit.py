@@ -224,34 +224,43 @@ class NJTransitAPI:
             print(f"⚠️ getStationMSG error: {e}")
             return []
 
-    def get_train_status(self, train_number: str) -> Dict:
+    def get_train_status(self, train_number: str, query_station: str = None) -> Dict:
         """
         Get train status from NJ Transit API
-        Returns real-time delay information for a specific train
+        Returns real-time delay information for a specific train.
+
+        query_station: if provided, query getTrainSchedule from this station
+        directly (used for morning trains so track/time reflect the user's
+        boarding stop, not the train's origin further down the line).
+        If omitted, falls back to GTFS origin lookup (correct for evening
+        trains where the user boards at the origin: NY Penn / Hoboken).
         """
-        
+
         # If no credentials, fall back to mock
         if not self.username or not self.password:
             return self._mock_train_status(train_number)
-        
+
         # Get token
         token = self.get_token()
         if not token:
             print("⚠️ Failed to get token, using mock data")
             return self._mock_train_status(train_number)
-        
-        # Look up the train's origin station from GTFS so we check the delay
-        # AT the departure point, not at an arbitrary intermediate stop (Newark Penn).
-        # For evening trains originating at NY Penn this is critical — the delay
-        # at NY Penn is what commuters boarding there actually care about.
-        origin_station = 'NP'  # fallback: Newark Penn
-        try:
-            import gtfs as _gtfs
-            gtfs_origin = _gtfs.get_train_origin_njt_code(train_number)
-            if gtfs_origin:
-                origin_station = gtfs_origin
-        except Exception as _e:
-            print(f"⚠️ GTFS origin lookup failed for {train_number}: {_e}")
+
+        if query_station:
+            # Morning trains: query from user's boarding station so track and
+            # scheduled departure reflect their actual stop, not the origin.
+            origin_station = query_station
+            print(f"   🔍 Querying {train_number} from boarding station {query_station}")
+        else:
+            # Evening trains: user boards at origin (NY Penn / Hoboken) — use GTFS.
+            origin_station = 'NP'  # fallback: Newark Penn
+            try:
+                import gtfs as _gtfs
+                gtfs_origin = _gtfs.get_train_origin_njt_code(train_number)
+                if gtfs_origin:
+                    origin_station = gtfs_origin
+            except Exception as _e:
+                print(f"⚠️ GTFS origin lookup failed for {train_number}: {_e}")
 
         url = f"{self.base_url}/getTrainSchedule"
 

@@ -217,8 +217,11 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
     if not trains:
         return
 
-    # Fetch all statuses upfront so context lines are always current
-    statuses = [(t, nj_transit.get_train_status(t)) for t in trains]
+    # Fetch all statuses upfront so context lines are always current.
+    # Pass the boarding station for morning trains so track + departure time
+    # reflect the user's stop, not the train's origin further down the line.
+    query_st = station or None
+    statuses = [(t, nj_transit.get_train_status(t, query_station=query_st)) for t in trains]
 
     for i, (train_number, status) in enumerate(statuses):
         context = statuses[i + 1:]  # remaining trains shown as backup context
