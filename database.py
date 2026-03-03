@@ -5,6 +5,7 @@ Uses PostgreSQL (Supabase) for persistent storage
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import random
+import json
 import os
 from datetime import datetime
 from typing import Optional, List, Dict
@@ -44,6 +45,20 @@ def init_db():
         # Migration: add ntfy_topic column and make phone nullable
         c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS ntfy_topic TEXT")
         c.execute("ALTER TABLE subscriptions ALTER COLUMN phone DROP NOT NULL")
+        # Migration: add multi-train columns (up to 3 trains per direction)
+        c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS morning_trains JSONB")
+        c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS evening_trains JSONB")
+        # Backfill: wrap existing single train into 1-element array for existing rows
+        c.execute("""
+            UPDATE subscriptions
+            SET morning_trains = jsonb_build_array(morning_train)
+            WHERE morning_trains IS NULL AND morning_train IS NOT NULL AND morning_train != ''
+        """)
+        c.execute("""
+            UPDATE subscriptions
+            SET evening_trains = jsonb_build_array(evening_train)
+            WHERE evening_trains IS NULL AND evening_train IS NOT NULL AND evening_train != ''
+        """)
         
         conn.commit()
         conn.close()
@@ -54,17 +69,29 @@ def init_db():
 
 def save_subscription(phone: Optional[str] = None, morning_train: str = '',
                      evening_train: str = '', delay_alerts: bool = True,
-                     ontime_alerts: bool = True, station: str = '') -> dict:
+                     ontime_alerts: bool = True, station: str = '',
+                     morning_trains: Optional[List[str]] = None,
+                     evening_trains: Optional[List[str]] = None) -> dict:
     """
     Save a new subscription.
-    - Always generates a unique ntfy_topic for push notifications.
-    - Phone is required. Subscription is immediately 'active' — no verification step.
-    Returns dict: {'ntfy_topic': str}
+    morning_trains / evening_trains: ordered list of up to 3 train numbers.
+    If not provided, wraps morning_train / evening_train as single-element lists.
+    The old single-train columns are kept in sync (first element) for backward compat.
     """
     import secrets as _secrets
     ntfy_topic = 'njtransit-' + _secrets.token_urlsafe(12)
     verification_code = None
     initial_status = 'active'
+
+    # Derive effective train lists
+    m_trains = [t for t in morning_trains if t] if morning_trains is not None \
+               else ([morning_train] if morning_train else [])
+    e_trains = [t for t in evening_trains if t] if evening_trains is not None \
+               else ([evening_train] if evening_train else [])
+
+    # Sync backward-compat single columns from first element
+    morning_train = m_trains[0] if m_trains else morning_train
+    evening_train = e_trains[0] if e_trains else evening_train
 
     conn = get_connection()
     c = conn.cursor()
@@ -73,10 +100,11 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
         c.execute('''
             INSERT INTO subscriptions
             (phone, morning_train, evening_train, delay_alerts, ontime_alerts,
-             verification_code, status, station, ntfy_topic)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+             verification_code, status, station, ntfy_topic, morning_trains, evening_trains)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ''', (phone, morning_train, evening_train, delay_alerts, ontime_alerts,
-              verification_code, initial_status, station, ntfy_topic))
+              verification_code, initial_status, station, ntfy_topic,
+              json.dumps(m_trains), json.dumps(e_trains)))
 
         conn.commit()
         label = phone or 'no-phone'
@@ -91,15 +119,16 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
         reactivated = existing and existing[1] == 'inactive'
         if existing and existing[0]:
             ntfy_topic = existing[0]  # keep so user's ntfy app subscription stays valid
-        # else: ntfy_topic stays as the newly generated one — backfill it below
 
         c.execute('''
             UPDATE subscriptions
             SET morning_train=%s, evening_train=%s, delay_alerts=%s, ontime_alerts=%s,
-                verification_code=%s, status=%s, updated_at=%s, station=%s, ntfy_topic=%s
+                verification_code=%s, status=%s, updated_at=%s, station=%s, ntfy_topic=%s,
+                morning_trains=%s, evening_trains=%s
             WHERE phone=%s
         ''', (morning_train, evening_train, delay_alerts, ontime_alerts,
-              verification_code, initial_status, datetime.now(), station, ntfy_topic, phone))
+              verification_code, initial_status, datetime.now(), station, ntfy_topic,
+              json.dumps(m_trains), json.dumps(e_trains), phone))
 
         conn.commit()
         action = 'reactivated' if reactivated else 'updated'
@@ -141,7 +170,8 @@ def get_active_subscriptions() -> List[Dict]:
     c = conn.cursor(cursor_factory=RealDictCursor)
     
     c.execute('''
-        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, station, ntfy_topic
+        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts,
+               station, ntfy_topic, morning_trains, evening_trains
         FROM subscriptions
         WHERE status='active'
     ''')
@@ -160,7 +190,8 @@ def get_subscription(phone: str) -> Optional[Dict]:
     c = conn.cursor(cursor_factory=RealDictCursor)
     
     c.execute('''
-        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, status, station, ntfy_topic
+        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts,
+               status, station, ntfy_topic, morning_trains, evening_trains
         FROM subscriptions
         WHERE phone=%s
     ''', (phone,))
@@ -193,7 +224,8 @@ def get_subscription_by_topic(topic: str) -> Optional[Dict]:
     conn = get_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute('''
-        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts, status, station, ntfy_topic
+        SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts,
+               status, station, ntfy_topic, morning_trains, evening_trains
         FROM subscriptions
         WHERE ntfy_topic=%s
     ''', (topic,))

@@ -126,33 +126,64 @@ def check_trains():
     for sub in subscriptions:
         check_subscriber_trains(sub)
 
+def _format_context(context_statuses: list, station: str = '') -> str:
+    """Format backup trains as summary lines for cascade notifications."""
+    lines = []
+    for train_num, status in context_statuses:
+        sched = status.get('scheduled_departure')
+        # For morning trains, look up departure at the commuter's boarding station
+        if station and sched:
+            try:
+                import gtfs as _gtfs
+                gt = _gtfs.get_train_departure_at_station(train_num, station)
+                if gt:
+                    sched = gt
+            except Exception:
+                pass
+        if status['cancelled']:
+            lines.append(f"  Train {train_num}: Cancelled")
+        elif status['delayed']:
+            actual = status.get('actual_departure')
+            t = actual.strftime('%I:%M %p') if actual else (sched.strftime('%I:%M %p') if sched else '?')
+            lines.append(f"  Train {train_num}: Delayed {status['delay_minutes']} min ({t})")
+        elif status['on_time']:
+            t = sched.strftime('%I:%M %p') if sched else '?'
+            lines.append(f"  Train {train_num}: On time, {t}")
+        else:
+            lines.append(f"  Train {train_num}: Status unknown")
+    return "\n".join(lines)
+
+
 def check_subscriber_trains(sub: dict):
-    """Check trains for a specific subscriber"""
+    """Check all trains for a specific subscriber"""
     phone = sub['phone']
     home_station = sub.get('station') or ''
-
     ntfy_topic = sub.get('ntfy_topic') or None
     manage_url = f"https://black-plant-0162ad510.4.azurestaticapps.net/?topic={ntfy_topic}" if ntfy_topic else None
 
-    # Look up human-readable station names for notifications
+    # Use new multi-train columns, fall back to old single-train columns
+    morning_trains = sub.get('morning_trains') or ([sub['morning_train']] if sub.get('morning_train') else [])
+    evening_trains = sub.get('evening_trains') or ([sub['evening_train']] if sub.get('evening_train') else [])
+    morning_trains = [t for t in morning_trains if t]
+    evening_trains = [t for t in evening_trains if t]
+
     morning_station_name = ''
     evening_station_name = ''
     try:
         import gtfs as _gtfs
         if home_station:
             morning_station_name = _gtfs.get_station_name(home_station) or home_station
-        if sub['evening_train']:
-            origin_code = _gtfs.get_train_origin_njt_code(sub['evening_train'])
+        if evening_trains:
+            origin_code = _gtfs.get_train_origin_njt_code(evening_trains[0])
             if origin_code:
                 evening_station_name = _gtfs.get_station_name(origin_code) or ''
     except Exception:
         pass
 
-    # Morning train: alert fires based on departure from home station
-    if sub['morning_train']:
-        check_train(
+    if morning_trains:
+        check_train_group(
             phone=phone,
-            train_number=sub['morning_train'],
+            trains=morning_trains,
             send_delay=sub['delay_alerts'],
             send_ontime=sub['ontime_alerts'],
             station=home_station,
@@ -161,103 +192,123 @@ def check_subscriber_trains(sub: dict):
             manage_url=manage_url
         )
 
-    # Evening train: train originates at NYC, so NJT API time is already correct
-    if sub['evening_train']:
-        check_train(
+    if evening_trains:
+        check_train_group(
             phone=phone,
-            train_number=sub['evening_train'],
+            trains=evening_trains,
             send_delay=sub['delay_alerts'],
             send_ontime=sub['ontime_alerts'],
+            station='',
             station_name=evening_station_name,
             ntfy_topic=ntfy_topic,
             manage_url=manage_url
         )
 
-def check_train(phone: str, train_number: str, send_delay: bool, send_ontime: bool,
-               station: str = '', station_name: str = '',
-               ntfy_topic: str = None, manage_url: str = None):
-    """Check status of a specific train and send alerts if needed"""
 
-    # Get train status from NJ Transit API
-    status = nj_transit.get_train_status(train_number)
+def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: bool,
+                      station: str = '', station_name: str = '',
+                      ntfy_topic: str = None, manage_url: str = None):
+    """
+    Check up to 3 trains with cascade alerts.
+    - Delay/cancel on any train includes status snapshot of the remaining trains.
+    - On-time alert for each train includes remaining trains as context.
+    """
+    trains = [t for t in trains if t]
+    if not trains:
+        return
 
-    # Track notification — fire once when track is first assigned
-    track = status.get('track', '').strip()
-    track_key = f"{phone}_{train_number}"
-    prev_track = last_track.get(track_key, '')
-    if track and track != prev_track and ntfy_topic:
-        last_track[track_key] = track
-        departure_time = ''
-        if status.get('scheduled_departure'):
-            departure_time = f" | Departs {status['scheduled_departure'].strftime('%I:%M %p')}"
-        loc = f" at {station_name}" if station_name else ''
-        print(f"   🚉 Train {train_number} assigned track {track}{loc} → Alerting {phone}")
-        sms_service._send_ntfy(
-            title=f"Train {train_number} - Track {track}",
-            message=f"Track {track} assigned{loc}{departure_time}",
-            priority="default",
-            topic=ntfy_topic,
-            click_url=manage_url
-        )
-    elif not track and prev_track:
-        last_track[track_key] = ''  # track was cleared (reassignment pending)
+    # Fetch all statuses upfront so context lines are always current
+    statuses = [(t, nj_transit.get_train_status(t)) for t in trains]
 
-    # Create unique key to track if we've already alerted
-    alert_key = f"{phone}_{train_number}_{status['status']}"
+    for i, (train_number, status) in enumerate(statuses):
+        context = statuses[i + 1:]  # remaining trains shown as backup context
 
-    # Check if we already sent this alert today
-    if alert_key in sent_alerts:
-        last_sent = sent_alerts[alert_key]
-        if (_now_et() - last_sent).total_seconds() < 3600:  # Don't repeat within 1 hour
-            return
+        # ── Track notification ──────────────────────────────────────────────
+        track = status.get('track', '').strip()
+        track_key = f"{phone}_{train_number}"
+        prev_track = last_track.get(track_key, '')
+        if track and track != prev_track and ntfy_topic:
+            last_track[track_key] = track
+            dep_str = ''
+            if status.get('scheduled_departure'):
+                dep_str = f" | Departs {status['scheduled_departure'].strftime('%I:%M %p')}"
+            loc = f" at {station_name}" if station_name else ''
+            print(f"   🚉 Train {train_number} track {track}{loc} → Alerting {phone}")
+            sms_service._send_ntfy(
+                title=f"Train {train_number} - Track {track}",
+                message=f"Track {track} assigned{loc}{dep_str}",
+                priority="default",
+                topic=ntfy_topic,
+                click_url=manage_url
+            )
+        elif not track and prev_track:
+            last_track[track_key] = ''
 
-    # Send delay alert
-    if status['delayed'] and send_delay:
-        print(f"   ⚠️  Train {train_number} delayed {status['delay_minutes']} min → Alerting {phone}")
-        sms_service.send_delay_alert(phone, train_number, status['delay_minutes'], station_name,
-                                     ntfy_topic=ntfy_topic, manage_url=manage_url)
-        sent_alerts[alert_key] = _now_et()
+        # ── Dedup check ─────────────────────────────────────────────────────
+        alert_key = f"{phone}_{train_number}_{status['status']}"
+        if alert_key in sent_alerts:
+            if (_now_et() - sent_alerts[alert_key]).total_seconds() < 3600:
+                continue
 
-    # Send cancellation alert
-    elif status['cancelled'] and send_delay:
-        print(f"   🚫 Train {train_number} cancelled → Alerting {phone}")
-        sms_service.send_cancellation_alert(phone, train_number, station_name,
-                                            ntfy_topic=ntfy_topic, manage_url=manage_url)
-        sent_alerts[alert_key] = _now_et()
+        ctx = ('\n' + _format_context(context, station)) if context else ''
 
-    # Send on-time alert (30 min before departure from the commuter's boarding station)
-    elif status['on_time'] and send_ontime:
-        scheduled = status['scheduled_departure']
-
-        # If we know the commuter's boarding station, look up departure time there
-        # from GTFS rather than using the train's origin departure time.
-        # This ensures the 25-35 min window is relative to when THEY board, not
-        # when the train left Trenton / some upstream station.
-        if station:
-            try:
-                import gtfs as _gtfs
-                gtfs_time = _gtfs.get_train_departure_at_station(train_number, station)
-                if gtfs_time:
-                    scheduled = gtfs_time
-            except Exception as e:
-                print(f"   ⚠️  GTFS departure lookup failed for {train_number} at {station}: {e}")
-
-        if scheduled is None:
-            print(f"   ⚠️  Train {train_number} has no scheduled time")
-            return
-
-        minutes_until = (scheduled - _now_et()).total_seconds() / 60
-
-        # Send alert if train departs in 25-35 minutes (catches the 30-min window)
-        if 25 <= minutes_until <= 35:
-            departure_time = scheduled.strftime('%I:%M %p')
-            print(f"   ✅ Train {train_number} on time → Alerting {phone}")
-            sms_service.send_ontime_alert(phone, train_number, departure_time, station_name,
-                                         ntfy_topic=ntfy_topic, manage_url=manage_url)
+        # ── Delay alert ─────────────────────────────────────────────────────
+        if status['delayed'] and send_delay:
+            actual = status.get('actual_departure')
+            actual_str = f" (now {actual.strftime('%I:%M %p')})" if actual else ''
+            loc = f" at {station_name}" if station_name else ''
+            msg = f"Delayed {status['delay_minutes']} min{actual_str}{loc}{ctx}"
+            print(f"   ⚠️  Train {train_number} delayed {status['delay_minutes']} min → Alerting {phone}")
+            sms_service._send_ntfy(
+                title=f"Train {train_number} Delayed - {status['delay_minutes']} min",
+                message=msg, priority="high",
+                topic=ntfy_topic, click_url=manage_url
+            )
             sent_alerts[alert_key] = _now_et()
 
-    else:
-        print(f"   ℹ️  Train {train_number} status: {status['status']} (no alert needed)")
+        # ── Cancellation alert ──────────────────────────────────────────────
+        elif status['cancelled'] and send_delay:
+            loc = f" at {station_name}" if station_name else ''
+            msg = f"Cancelled{loc}{ctx}"
+            print(f"   🚫 Train {train_number} cancelled → Alerting {phone}")
+            sms_service._send_ntfy(
+                title=f"Train {train_number} Cancelled",
+                message=msg, priority="urgent",
+                topic=ntfy_topic, click_url=manage_url
+            )
+            sent_alerts[alert_key] = _now_et()
+
+        # ── On-time alert (30-min window) ───────────────────────────────────
+        elif status['on_time'] and send_ontime:
+            scheduled = status['scheduled_departure']
+            if station:
+                try:
+                    import gtfs as _gtfs
+                    gtfs_time = _gtfs.get_train_departure_at_station(train_number, station)
+                    if gtfs_time:
+                        scheduled = gtfs_time
+                except Exception as e:
+                    print(f"   ⚠️  GTFS lookup failed for {train_number} at {station}: {e}")
+
+            if scheduled is None:
+                print(f"   ⚠️  Train {train_number} has no scheduled time")
+                continue
+
+            minutes_until = (scheduled - _now_et()).total_seconds() / 60
+            if 25 <= minutes_until <= 35:
+                dep_time = scheduled.strftime('%I:%M %p')
+                loc = f" at {station_name}" if station_name else ''
+                msg = f"On time — departs {dep_time}{loc}{ctx}"
+                print(f"   ✅ Train {train_number} on time → Alerting {phone}")
+                sms_service._send_ntfy(
+                    title=f"Train {train_number} On Time",
+                    message=msg, priority="default",
+                    topic=ntfy_topic, click_url=manage_url
+                )
+                sent_alerts[alert_key] = _now_et()
+
+        else:
+            print(f"   ℹ️  Train {train_number} status: {status['status']} (no alert needed)")
 
 def cleanup_old_alerts():
     """Clean up old alert tracking and track assignments (runs daily)"""

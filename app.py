@@ -91,8 +91,10 @@ FRONTEND_URL = "https://black-plant-0162ad510.4.azurestaticapps.net"
 
 class SubscribeRequest(BaseModel):
     phone: str  # Required — used as unique identifier
-    morning_train: str
-    evening_train: str
+    morning_train: str = ''   # legacy single-train (kept for backward compat)
+    evening_train: str = ''   # legacy single-train (kept for backward compat)
+    morning_trains: list = [] # up to 3 morning trains in priority order
+    evening_trains: list = [] # up to 3 evening trains in priority order
     delay_alerts: bool = True
     ontime_alerts: bool = True
     station: str = ''  # 2-char NJT station code for home station (e.g. 'PJ')
@@ -124,13 +126,19 @@ def subscribe(request: SubscribeRequest):
         if not phone:
             raise HTTPException(status_code=400, detail="Phone number is required")
 
+        # Resolve train lists — prefer new multi-train fields, fall back to legacy singles
+        morning_trains = request.morning_trains or ([request.morning_train] if request.morning_train else [])
+        evening_trains = request.evening_trains or ([request.evening_train] if request.evening_train else [])
+
         result = save_subscription(
             phone=phone,
-            morning_train=request.morning_train,
-            evening_train=request.evening_train,
+            morning_train=morning_trains[0] if morning_trains else '',
+            evening_train=evening_trains[0] if evening_trains else '',
             delay_alerts=request.delay_alerts,
             ontime_alerts=request.ontime_alerts,
-            station=request.station
+            station=request.station,
+            morning_trains=morning_trains,
+            evening_trains=evening_trains
         )
 
         ntfy_topic = result['ntfy_topic']
@@ -372,9 +380,13 @@ def manage_by_topic(topic: str):
             station_name = gtfs.get_station_name(station_code) or station_code
         except Exception:
             station_name = station_code
+    morning_trains = sub.get("morning_trains") or ([sub["morning_train"]] if sub.get("morning_train") else [])
+    evening_trains = sub.get("evening_trains") or ([sub["evening_train"]] if sub.get("evening_train") else [])
     return {
         "morning_train": sub["morning_train"],
         "evening_train": sub["evening_train"],
+        "morning_trains": morning_trains,
+        "evening_trains": evening_trains,
         "station": station_code,
         "station_name": station_name,
         "delay_alerts": sub["delay_alerts"],
