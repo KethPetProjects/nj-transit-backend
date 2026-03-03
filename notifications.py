@@ -45,7 +45,8 @@ class SMSService:
             "Tags": "train",
         }
         if click_url:
-            headers["Click"] = click_url
+            # Don't set Click — tapping the notification opens ntfy app to read the message.
+            # The Actions button lets users navigate to manage page if they want.
             headers["Actions"] = f"view, Manage subscription, {click_url}"
         try:
             requests.post(
