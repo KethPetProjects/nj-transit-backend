@@ -234,25 +234,28 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
         context = statuses[i + 1:]  # remaining trains shown as backup context
 
         # ── Track notification ──────────────────────────────────────────────
+        # Skip entirely for cancelled trains — NJT sometimes oscillates the track
+        # field on cancelled trains, which would cause repeated track+cancel loops.
         track = status.get('track', '').strip()
         track_key = f"{phone}_{train_number}"
         prev_track = last_track.get(track_key, '')
-        if track and track != prev_track and ntfy_topic:
-            last_track[track_key] = track
-            dep_str = ''
-            if status.get('scheduled_departure'):
-                dep_str = f" | Departs {status['scheduled_departure'].strftime('%I:%M %p')}"
-            loc = f" at {station_name}" if station_name else ''
-            print(f"   🚉 Train {train_number} track {track}{loc} → Alerting {phone}")
-            sms_service._send_ntfy(
-                title=f"Train {train_number} - Track {track}",
-                message=f"Track {track} assigned{loc}{dep_str}",
-                priority="default",
-                topic=ntfy_topic,
-                click_url=manage_url
-            )
-        elif not track and prev_track:
-            last_track[track_key] = ''
+        if not status['cancelled']:
+            if track and track != prev_track and ntfy_topic:
+                last_track[track_key] = track
+                dep_str = ''
+                if status.get('scheduled_departure'):
+                    dep_str = f" | Departs {status['scheduled_departure'].strftime('%I:%M %p')}"
+                loc = f" at {station_name}" if station_name else ''
+                print(f"   🚉 Train {train_number} track {track}{loc} → Alerting {phone}")
+                sms_service._send_ntfy(
+                    title=f"Train {train_number} - Track {track}",
+                    message=f"Track {track} assigned{loc}{dep_str}",
+                    priority="default",
+                    topic=ntfy_topic,
+                    click_url=manage_url
+                )
+            elif not track and prev_track:
+                last_track[track_key] = ''
 
         # ── Dedup check ─────────────────────────────────────────────────────
         alert_key = f"{phone}_{train_number}_{status['status']}"
