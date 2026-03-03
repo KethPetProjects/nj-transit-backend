@@ -46,6 +46,7 @@ class SMSService:
         }
         if click_url:
             headers["Click"] = click_url
+            headers["Actions"] = f"view, Manage subscription, {click_url}"
         try:
             requests.post(
                 f"{NTFY_BASE}/{effective_topic}",
