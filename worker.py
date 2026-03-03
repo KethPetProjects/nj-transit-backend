@@ -111,20 +111,26 @@ def check_trains():
         return
 
     print(f"\n🔍 [{now.strftime('%H:%M:%S')}] Checking trains...")
-    
-    # Get all active subscriptions
-    subscriptions = get_active_subscriptions()
-    
+
+    try:
+        subscriptions = get_active_subscriptions()
+    except Exception as e:
+        print(f"   ❌ DB error fetching subscriptions — skipping this cycle: {e}")
+        return
+
     if not subscriptions:
         print("   No active subscriptions")
         return
-    
+
     print(f"   Found {len(subscriptions)} active subscription(s)")
 
     check_service_alerts()
 
     for sub in subscriptions:
-        check_subscriber_trains(sub)
+        try:
+            check_subscriber_trains(sub)
+        except Exception as e:
+            print(f"   ❌ Error checking trains for {sub.get('phone','?')}: {e}")
 
 def _format_context(context_statuses: list, station: str = '') -> str:
     """Format backup trains as summary lines for cascade notifications."""

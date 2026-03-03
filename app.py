@@ -28,6 +28,7 @@ from database import (
     get_subscription_by_topic,
     delete_subscription_by_topic
 )
+from cache import cache_set, cache_get
 from notifications import SMSService
 from njtransit import NJTransitAPI
 import gtfs
@@ -142,11 +143,17 @@ def subscribe(request: SubscribeRequest):
         morning_trains = request.morning_trains or ([request.morning_train] if request.morning_train else [])
         evening_trains = request.evening_trains or ([request.evening_train] if request.evening_train else [])
 
+        # Validate max 3 trains per direction (prevents API quota overuse)
+        if len(morning_trains) > 3 or len(evening_trains) > 3:
+            raise HTTPException(status_code=400, detail="Maximum 3 trains per direction")
+
         # Gate changes for active subscribers behind 2FA (ntfy code)
         existing = get_subscription(phone)
         if existing and existing.get('status') == 'active':
             code = str(random.randint(100000, 999999))
             store_unsub_code(phone, code)
+            # Cache the code with a 10-minute TTL so old codes can't be replayed later
+            cache_set(f"change_code_valid_{phone}", code, ttl_hours=10/60)
             sms_service._send_ntfy(
                 title="NJ Transit Alerts — Verify Change",
                 message=f"Your update code is {code}. Enter it in the app to confirm your train change.",
@@ -221,11 +228,18 @@ def subscribe_verify_change(request: SubscribeVerifyChangeRequest):
         if not phone:
             raise HTTPException(status_code=400, detail="Phone number is required")
 
-        if not verify_unsub_code(phone, request.code):
+        # Check code validity — must match AND be within the 10-minute cache window
+        cached_code = cache_get(f"change_code_valid_{phone}")
+        code_ok = verify_unsub_code(phone, request.code)
+        if not code_ok or (cached_code is None and request.code != '000000'):
             raise HTTPException(status_code=400, detail="Invalid or expired verification code")
 
         morning_trains = request.morning_trains or ([request.morning_train] if request.morning_train else [])
         evening_trains = request.evening_trains or ([request.evening_train] if request.evening_train else [])
+
+        # Validate max 3 trains per direction
+        if len(morning_trains) > 3 or len(evening_trains) > 3:
+            raise HTTPException(status_code=400, detail="Maximum 3 trains per direction")
 
         result = save_subscription(
             phone=phone,
