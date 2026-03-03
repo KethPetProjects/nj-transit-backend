@@ -10,6 +10,7 @@ from typing import Optional
 from datetime import datetime, date, timedelta
 import uvicorn
 import secrets
+import random
 import os
 import httpx
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -103,6 +104,17 @@ class VerifyRequest(BaseModel):
     phone: str
     code: str
 
+class SubscribeVerifyChangeRequest(BaseModel):
+    phone: str
+    code: str
+    morning_train: str = ''
+    evening_train: str = ''
+    morning_trains: list = []
+    evening_trains: list = []
+    delay_alerts: bool = True
+    ontime_alerts: bool = True
+    station: str = ''
+
 
 # API Endpoints
 
@@ -129,6 +141,19 @@ def subscribe(request: SubscribeRequest):
         # Resolve train lists — prefer new multi-train fields, fall back to legacy singles
         morning_trains = request.morning_trains or ([request.morning_train] if request.morning_train else [])
         evening_trains = request.evening_trains or ([request.evening_train] if request.evening_train else [])
+
+        # Gate changes for active subscribers behind 2FA (ntfy code)
+        existing = get_subscription(phone)
+        if existing and existing.get('status') == 'active':
+            code = str(random.randint(100000, 999999))
+            store_unsub_code(phone, code)
+            sms_service._send_ntfy(
+                title="NJ Transit Alerts — Verify Change",
+                message=f"Your update code is {code}. Enter it in the app to confirm your train change.",
+                priority="high",
+                topic=existing['ntfy_topic']
+            )
+            return {"requires_verification": True, "phone": phone}
 
         result = save_subscription(
             phone=phone,
@@ -184,6 +209,60 @@ def subscribe(request: SubscribeRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/subscribe/verify-change")
+def subscribe_verify_change(request: SubscribeVerifyChangeRequest):
+    """
+    Verify a subscription change for an existing active subscriber.
+    Checks the 6-digit code sent to their ntfy topic, then applies the update.
+    """
+    try:
+        phone = request.phone.strip()
+        if not phone:
+            raise HTTPException(status_code=400, detail="Phone number is required")
+
+        if not verify_unsub_code(phone, request.code):
+            raise HTTPException(status_code=400, detail="Invalid or expired verification code")
+
+        morning_trains = request.morning_trains or ([request.morning_train] if request.morning_train else [])
+        evening_trains = request.evening_trains or ([request.evening_train] if request.evening_train else [])
+
+        result = save_subscription(
+            phone=phone,
+            morning_train=morning_trains[0] if morning_trains else '',
+            evening_train=evening_trains[0] if evening_trains else '',
+            delay_alerts=request.delay_alerts,
+            ontime_alerts=request.ontime_alerts,
+            station=request.station,
+            morning_trains=morning_trains,
+            evening_trains=evening_trains
+        )
+
+        ntfy_topic = result['ntfy_topic']
+        manage_url = f"{FRONTEND_URL}/?topic={ntfy_topic}"
+
+        sms_service._send_ntfy(
+            title="NJ Transit Alerts - Trains updated!",
+            message="Your train selections have been updated. Tap to view.",
+            priority="default",
+            topic=ntfy_topic,
+            click_url=manage_url
+        )
+
+        return {
+            "status": "active",
+            "returning": True,
+            "reactivated": False,
+            "message": "Trains updated!",
+            "ntfy_topic": ntfy_topic,
+            "manage_url": manage_url
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/verify")
 def verify(request: VerifyRequest):
