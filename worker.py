@@ -274,9 +274,12 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
         # ── Delay alert ─────────────────────────────────────────────────────
         if status['delayed'] and send_delay:
             actual = status.get('actual_departure')
-            actual_str = f" (now {actual.strftime('%I:%M %p')})" if actual else ''
             loc = f" at {station_name}" if station_name else ''
-            msg = f"Delayed {status['delay_minutes']} min{actual_str}{loc}{ctx}"
+            # Title already says "Delayed X min" — body just shows the new time
+            if actual:
+                msg = f"Now departing {actual.strftime('%I:%M %p')}{loc}{ctx}"
+            else:
+                msg = f"{status['delay_minutes']} min delay{loc}{ctx}"
             sched_label = _dep_str(status.get('scheduled_departure'))
             print(f"   ⚠️  Train {train_number} delayed {status['delay_minutes']} min → Alerting {phone}")
             sms_service._send_ntfy(
