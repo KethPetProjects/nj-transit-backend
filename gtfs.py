@@ -16,7 +16,7 @@ import os
 
 DATABASE_URL = os.getenv('DATABASE_URL')
 GTFS_URL = "https://www.njtransit.com/rail_data.zip"
-REFRESH_INTERVAL_DAYS = 7
+REFRESH_INTERVAL_DAYS = 2  # NJT license requires downloading new data within 3 business days
 
 # NYC-area destinations — trains headed here are "outbound" (commuter direction toward NYC)
 NYC_DESTINATIONS = [
