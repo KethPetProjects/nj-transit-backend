@@ -600,6 +600,63 @@ def admin_gtfs_refresh(username: str = Depends(verify_admin)):
     return {"status": "refresh_started", "message": "GTFS refresh triggered in background — check logs for progress"}
 
 
+@app.post("/admin/notify-schedule-change")
+def admin_notify_schedule_change(username: str = Depends(verify_admin)):
+    """
+    Admin: Check all subscribers' saved train numbers against the current GTFS schedule.
+    Sends a targeted ntfy notification only to subscribers whose trains are missing
+    from the next 14 days of the schedule, prompting them to review and update.
+    Run this after a GTFS refresh when NJT publishes a new seasonal timetable.
+    """
+    subscriptions = get_active_subscriptions()
+    notified = []
+    all_ok = []
+    skipped_no_topic = []
+
+    for sub in subscriptions:
+        ntfy_topic = sub.get('ntfy_topic')
+        morning_trains = sub.get('morning_trains') or ([sub['morning_train']] if sub.get('morning_train') else [])
+        evening_trains = sub.get('evening_trains') or ([sub['evening_train']] if sub.get('evening_train') else [])
+        all_trains = [t for t in morning_trains + evening_trains if t]
+
+        if not all_trains:
+            continue
+
+        missing = gtfs.check_trains_in_schedule(all_trains)
+
+        if missing:
+            if not ntfy_topic:
+                skipped_no_topic.append({'trains': sorted(missing)})
+                continue
+
+            manage_url = f"{FRONTEND_URL}/?topic={ntfy_topic}"
+            missing_str = ', '.join(sorted(missing))
+            sms_service._send_ntfy(
+                title="NJ Transit Schedule Updated",
+                message=(
+                    f"NJT just updated their schedule. "
+                    f"Train(s) {missing_str} may have changed or been renumbered. "
+                    f"Tap to review and update your train selections."
+                ),
+                priority="high",
+                topic=ntfy_topic,
+                click_url=manage_url
+            )
+            notified.append({'missing_trains': sorted(missing)})
+            print(f"📢 Schedule change alert sent — missing trains: {missing_str}")
+        else:
+            all_ok.append(True)
+
+    print(f"✅ Schedule change check complete: {len(notified)} notified, {len(all_ok)} OK, {len(skipped_no_topic)} skipped (no ntfy topic)")
+    return {
+        "total_checked": len(subscriptions),
+        "notified": len(notified),
+        "all_trains_ok": len(all_ok),
+        "skipped_no_topic": len(skipped_no_topic),
+        "message": f"Sent alerts to {len(notified)} subscriber(s) with outdated train numbers."
+    }
+
+
 # ========== SERVICE ALERTS FEATURE FLAG ==========
 
 @app.get("/admin/service-alerts/status")

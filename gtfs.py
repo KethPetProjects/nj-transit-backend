@@ -878,6 +878,47 @@ def get_train_departure_at_station(train_number: str, station_code: str,
         return None
 
 
+def check_trains_in_schedule(train_numbers: list, check_days: int = 14) -> set:
+    """
+    Check which of the given train numbers (NJT block_ids) are NOT found
+    in the GTFS schedule for the next check_days days.
+    Checks 14 days by default to cover weekday-only trains across two full weeks.
+    Returns the set of train numbers that are missing from the new schedule.
+    """
+    if not train_numbers:
+        return set()
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+
+        today = date.today()
+        upcoming = [today + timedelta(days=i) for i in range(check_days)]
+
+        c.execute(
+            'SELECT DISTINCT service_id FROM gtfs_calendar_dates WHERE date = ANY(%s) AND exception_type = 1',
+            (upcoming,)
+        )
+        service_ids = [r[0] for r in c.fetchall()]
+
+        if not service_ids:
+            conn.close()
+            print("⚠️ check_trains_in_schedule: no active services found for upcoming dates")
+            return set(train_numbers)  # can't confirm anything — treat all as missing
+
+        c.execute(
+            'SELECT DISTINCT block_id FROM gtfs_trips WHERE block_id = ANY(%s) AND service_id = ANY(%s)',
+            (list(train_numbers), service_ids)
+        )
+        found = {r[0] for r in c.fetchall()}
+        conn.close()
+
+        missing = set(train_numbers) - found
+        return missing
+    except Exception as e:
+        print(f"⚠️ check_trains_in_schedule failed: {e}")
+        return set()
+
+
 def get_status() -> dict:
     """Return GTFS data status: last updated timestamp + record counts."""
     try:
