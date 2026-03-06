@@ -600,7 +600,7 @@ def admin_gtfs_refresh(username: str = Depends(verify_admin)):
     return {"status": "refresh_started", "message": "GTFS refresh triggered in background — check logs for progress"}
 
 
-@app.post("/admin/notify-schedule-change")
+@app.get("/admin/notify-schedule-change")
 def admin_notify_schedule_change(username: str = Depends(verify_admin)):
     """
     Admin: Check all subscribers' saved train numbers against the current GTFS schedule.
