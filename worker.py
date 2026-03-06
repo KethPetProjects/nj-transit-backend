@@ -353,6 +353,66 @@ def cleanup_old_alerts():
 
     print(f"   Removed {len(old_keys)} old alert(s), reset track + service alert state")
 
+def refresh_gtfs_and_notify():
+    """
+    Refresh GTFS data if stale, then notify subscribers whose saved train numbers
+    are no longer in the new schedule. Runs every 2 days via the worker scheduler.
+    """
+    import gtfs as _gtfs
+    print(f"\n🔄 [{_now_et().strftime('%H:%M:%S')}] Checking GTFS freshness...")
+    try:
+        before = _gtfs.get_last_updated()
+        _gtfs.load_or_refresh()  # blocking — we need to know if a real refresh happened
+        after = _gtfs.get_last_updated()
+    except Exception as e:
+        print(f"   ❌ GTFS refresh failed: {e}")
+        return
+
+    if not after or before == after:
+        print("   ✅ GTFS already current — no subscriber check needed")
+        return
+
+    print(f"   🆕 GTFS refreshed — checking subscriber train numbers...")
+    try:
+        subscriptions = get_active_subscriptions()
+    except Exception as e:
+        print(f"   ❌ DB error fetching subscriptions: {e}")
+        return
+
+    notified = 0
+    for sub in subscriptions:
+        ntfy_topic = sub.get('ntfy_topic')
+        morning_trains = sub.get('morning_trains') or ([sub['morning_train']] if sub.get('morning_train') else [])
+        evening_trains = sub.get('evening_trains') or ([sub['evening_train']] if sub.get('evening_train') else [])
+        all_trains = [t for t in morning_trains + evening_trains if t]
+        if not all_trains or not ntfy_topic:
+            continue
+        try:
+            missing = _gtfs.check_trains_in_schedule(all_trains)
+        except Exception:
+            continue
+        if missing:
+            missing_str = ', '.join(sorted(missing))
+            manage_url = f"https://black-plant-0162ad510.4.azurestaticapps.net/?topic={ntfy_topic}"
+            print(f"   📢 Train(s) {missing_str} missing from new schedule — notifying subscriber")
+            sms_service._send_ntfy(
+                title="NJ Transit Schedule Updated",
+                message=(
+                    f"NJT updated their schedule. Train(s) {missing_str} may have changed "
+                    f"or been renumbered. Tap to review and update your selections."
+                ),
+                priority="high",
+                topic=ntfy_topic,
+                click_url=manage_url
+            )
+            notified += 1
+
+    if notified:
+        print(f"   ✅ Notified {notified} subscriber(s) of schedule changes")
+    else:
+        print(f"   ✅ All {len(subscriptions)} subscribers' train numbers are valid in new schedule")
+
+
 def main():
     """Main worker loop"""
     print("\n" + "="*60)
@@ -366,6 +426,7 @@ def main():
     # Schedule jobs
     schedule.every(2).minutes.do(check_trains)
     schedule.every().day.at("00:00").do(cleanup_old_alerts)
+    schedule.every(2).days.do(refresh_gtfs_and_notify)
     
     # Run immediately on start
     check_trains()
