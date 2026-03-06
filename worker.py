@@ -35,6 +35,11 @@ sent_service_alerts = set()
 ACTIVE_HOUR_START = 6   # 6 AM ET
 ACTIVE_HOUR_END   = 20  # 8 PM ET
 
+MORNING_START = 6   # 6 AM — morning trains start being checked
+MORNING_END   = 10  # 10 AM — stop checking morning trains
+EVENING_START = 14  # 2 PM — start checking evening trains
+EVENING_END   = 20  # 8 PM — stop checking evening trains
+
 def _parse_utc_date(date_str: str):
     """Parse MSG_PUBDATE_UTC string (e.g. '3/2/2026 9:52:00 PM') to UTC datetime."""
     try:
@@ -186,7 +191,9 @@ def check_subscriber_trains(sub: dict):
     except Exception:
         pass
 
-    if morning_trains:
+    now_hour = _now_et().hour
+
+    if morning_trains and MORNING_START <= now_hour < MORNING_END:
         check_train_group(
             phone=phone,
             trains=morning_trains,
@@ -198,7 +205,7 @@ def check_subscriber_trains(sub: dict):
             manage_url=manage_url
         )
 
-    if evening_trains:
+    if evening_trains and EVENING_START <= now_hour < EVENING_END:
         check_train_group(
             phone=phone,
             trains=evening_trains,
