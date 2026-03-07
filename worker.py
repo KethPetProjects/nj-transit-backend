@@ -116,6 +116,7 @@ def check_trains():
         return
 
     print(f"\n🔍 [{now.strftime('%H:%M:%S')}] Checking trains...")
+    nj_transit.clear_cycle_cache()  # fresh station data each cycle
 
     try:
         subscriptions = get_active_subscriptions()

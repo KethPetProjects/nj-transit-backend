@@ -3,10 +3,17 @@ NJ Transit API Client
 Real API implementation for NJ Transit Rail Data
 """
 import requests
+import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 import os
 from cache import cache_get, cache_set
+
+# Per-cycle station response cache — keyed by origin_station, value is (timestamp, raw ITEMS list).
+# Cleared at the start of each worker check cycle via clear_cycle_cache().
+# Means one getTrainSchedule call per unique station per cycle, regardless of how many
+# subscribers board at that station or how many trains they track.
+_station_cache: Dict[str, tuple] = {}
 
 class NJTransitAPI:
     """NJ Transit API Client"""
@@ -28,6 +35,10 @@ class NJTransitAPI:
             print("⚠️  NJ Transit API credentials not found in environment variables")
             print("🚂 NJ Transit API initialized (MOCK MODE - no credentials)")
     
+    def clear_cycle_cache(self):
+        """Clear the per-cycle station cache. Call at the start of each worker check cycle."""
+        _station_cache.clear()
+
     def get_token(self) -> str:
         """Get authentication token (valid for 24 hours, limit 10 calls/day)"""
         
@@ -262,41 +273,43 @@ class NJTransitAPI:
             except Exception as _e:
                 print(f"⚠️ GTFS origin lookup failed for {train_number}: {_e}")
 
-        url = f"{self.base_url}/getTrainSchedule"
-
-        # Use files parameter for multipart/form-data
-        files = {
-            'token': (None, token),
-            'station': (None, origin_station)
-        }
-        
-        try:
-            response = requests.post(url, files=files)
-            response.raise_for_status()
-            result = response.json()
-            
-            # Find the specific train
-            items = result.get('ITEMS', [])
-            for train in items:
-                if train.get('TRAIN_ID') == train_number:
-                    return self._parse_train_data(train)
-            
-            # Train not found in current schedule
-            print(f"ℹ️  Train {train_number} not in current schedule")
-            return {
-                'train_number': train_number,
-                'scheduled_departure': None,
-                'actual_departure': None,
-                'delay_minutes': 0,
-                'on_time': True,
-                'delayed': False,
-                'cancelled': False,
-                'status': 'not_scheduled'
+        # Check cycle cache — one getTrainSchedule call per station per cycle
+        cached = _station_cache.get(origin_station)
+        if cached:
+            items = cached
+            print(f"   ✅ [{origin_station}] Using cycle-cached station data for train {train_number}")
+        else:
+            url = f"{self.base_url}/getTrainSchedule"
+            files = {
+                'token': (None, token),
+                'station': (None, origin_station)
             }
-            
-        except Exception as e:
-            print(f"❌ Error getting train status: {e}")
-            return self._mock_train_status(train_number)
+            try:
+                response = requests.post(url, files=files)
+                response.raise_for_status()
+                items = response.json().get('ITEMS', [])
+                _station_cache[origin_station] = items
+                print(f"   🌐 [{origin_station}] Fetched fresh station data ({len(items)} trains)")
+            except Exception as e:
+                print(f"❌ Error getting train status: {e}")
+                return self._mock_train_status(train_number)
+
+        for train in items:
+            if train.get('TRAIN_ID') == train_number:
+                return self._parse_train_data(train)
+
+        # Train not found in current schedule
+        print(f"ℹ️  Train {train_number} not in current schedule at {origin_station}")
+        return {
+            'train_number': train_number,
+            'scheduled_departure': None,
+            'actual_departure': None,
+            'delay_minutes': 0,
+            'on_time': True,
+            'delayed': False,
+            'cancelled': False,
+            'status': 'not_scheduled'
+        }
     
     def _parse_train_data(self, train: Dict) -> Dict:
         """Parse train data from API response"""
