@@ -226,6 +226,44 @@ def _dep_str(scheduled) -> str:
     return f"({scheduled.strftime('%I:%M %p').lstrip('0')})"
 
 
+def _gtfs_departure(train_number: str, station: str):
+    """
+    Return the GTFS scheduled departure time for a train at the given station.
+    For morning trains: station is the subscriber's boarding station.
+    For evening trains: station is empty — fall back to the train's GTFS origin.
+    Returns None if GTFS has no data (caller should default to checking).
+    """
+    try:
+        import gtfs as _gtfs
+        if station:
+            return _gtfs.get_train_departure_at_station(train_number, station)
+        else:
+            origin = _gtfs.get_train_origin_njt_code(train_number)
+            if origin:
+                return _gtfs.get_train_departure_at_station(train_number, origin)
+    except Exception:
+        pass
+    return None
+
+
+def _in_check_window(train_number: str, station: str) -> bool:
+    """
+    Return True if this train should be checked right now.
+
+    Start: 35 min before scheduled departure — ensures we capture the
+           25–35 min on-time alert window.
+    Stop:  90 min after scheduled departure — covers virtually all NJT
+           delays. Train status 'not_scheduled' (departed) naturally
+           produces no alert, so extra checks near the boundary are harmless.
+    Fallback: if GTFS has no departure time, always check (safe default).
+    """
+    dep = _gtfs_departure(train_number, station)
+    if dep is None:
+        return True  # no GTFS data — don't skip
+    minutes_until = (dep - _now_et()).total_seconds() / 60
+    return -90 <= minutes_until <= 35
+
+
 def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: bool,
                       station: str = '', station_name: str = '',
                       ntfy_topic: str = None, manage_url: str = None):
@@ -238,11 +276,24 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
     if not trains:
         return
 
+    # Filter to trains within their active check window before hitting the API.
+    # Window: 35 min before departure → 90 min after (covers delays up to 90 min).
+    # Trains outside this window are skipped entirely — no API call made.
+    active_trains = [t for t in trains if _in_check_window(t, station)]
+    skipped = set(trains) - set(active_trains)
+    for t in skipped:
+        dep = _gtfs_departure(t, station)
+        mins = f"{(dep - _now_et()).total_seconds()/60:.0f} min" if dep else "unknown"
+        print(f"   ⏭️  Train {t}: {mins} until departure — outside check window, skipping")
+
+    if not active_trains:
+        return
+
     # Fetch all statuses upfront so context lines are always current.
     # Pass the boarding station for morning trains so track + departure time
     # reflect the user's stop, not the train's origin further down the line.
     query_st = station or None
-    statuses = [(t, nj_transit.get_train_status(t, query_station=query_st)) for t in trains]
+    statuses = [(t, nj_transit.get_train_status(t, query_station=query_st)) for t in active_trains]
 
     for i, (train_number, status) in enumerate(statuses):
         context = statuses[i + 1:]  # remaining trains shown as backup context
