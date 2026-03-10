@@ -623,7 +623,7 @@ def load_or_refresh_background():
     return t
 
 
-def get_station_schedule(station_code: str, query_date: Optional[date] = None) -> dict:
+def get_station_schedule(station_code: str, query_date: Optional[date] = None, preferred_hub: Optional[str] = None) -> dict:
     """
     Return train schedule for a station using GTFS DB data.
     Format: {'outbound': [...], 'inbound': [...]}
@@ -672,12 +672,24 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
 
         # 3. Query trains that stop at this station on this date.
         #    pickup_type=0 AND drop_off_type=0 = normal stop (not pass-through).
-        #    nyc_departure_time: departure time at the NYC hub stop (Penn Station,
-        #    Hoboken, Secaucus, or Newark Penn) that occurred BEFORE this station.
-        #    NULL means the train did not come from an NYC hub — skip it as inbound.
-        #    For inbound trains we show the NYC hub departure time, not the home-station
-        #    time, because commuters board at NYC and need to know when to be there.
-        c.execute('''
+        #    nyc_departure_time: departure time at the NYC hub stop that occurred
+        #    BEFORE this station. When preferred_hub is set (HB=Hoboken, SE=Secaucus)
+        #    only that hub's departure time is returned — used for lines where commuters
+        #    board at either Hoboken or Secaucus (Main Line, Bergen County, Pascack Valley).
+        _HUB_CONDITIONS = {
+            'HB': "lower(prior_s.stop_name) LIKE '%%hoboken%%'",
+            'SE': "lower(prior_s.stop_name) LIKE '%%secaucus%%'",
+        }
+        hub_condition = _HUB_CONDITIONS.get(preferred_hub) if preferred_hub else None
+        if not hub_condition:
+            hub_condition = """(
+                        lower(prior_s.stop_name) LIKE '%%penn station%%'
+                        OR lower(prior_s.stop_name) LIKE '%%hoboken%%'
+                        OR lower(prior_s.stop_name) LIKE '%%secaucus%%'
+                        OR lower(prior_s.stop_name) LIKE '%%newark penn%%'
+                      )"""
+
+        c.execute(f'''
             SELECT
                 st.departure_time,
                 st.arrival_time,
@@ -692,12 +704,7 @@ def get_station_schedule(station_code: str, query_date: Optional[date] = None) -
                     JOIN gtfs_stops prior_s ON prior_st.stop_id = prior_s.stop_id
                     WHERE prior_st.trip_id = t.trip_id
                       AND prior_st.stop_sequence < st.stop_sequence
-                      AND (
-                        lower(prior_s.stop_name) LIKE '%%penn station%%'
-                        OR lower(prior_s.stop_name) LIKE '%%hoboken%%'
-                        OR lower(prior_s.stop_name) LIKE '%%secaucus%%'
-                        OR lower(prior_s.stop_name) LIKE '%%newark penn%%'
-                      )
+                      AND {hub_condition}
                     ORDER BY prior_st.stop_sequence ASC
                     LIMIT 1
                 ) AS nyc_departure_time

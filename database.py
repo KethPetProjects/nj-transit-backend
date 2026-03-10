@@ -48,6 +48,8 @@ def init_db():
         # Migration: add multi-train columns (up to 3 trains per direction)
         c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS morning_trains JSONB")
         c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS evening_trains JSONB")
+        # Migration: add evening_hub (HB=Hoboken, SE=Secaucus, NULL=not applicable)
+        c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS evening_hub TEXT")
         # Backfill: wrap existing single train into 1-element array for existing rows
         c.execute("""
             UPDATE subscriptions
@@ -71,7 +73,8 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
                      evening_train: str = '', delay_alerts: bool = True,
                      ontime_alerts: bool = True, station: str = '',
                      morning_trains: Optional[List[str]] = None,
-                     evening_trains: Optional[List[str]] = None) -> dict:
+                     evening_trains: Optional[List[str]] = None,
+                     evening_hub: Optional[str] = None) -> dict:
     """
     Save a new subscription.
     morning_trains / evening_trains: ordered list of up to 3 train numbers.
@@ -100,11 +103,12 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
         c.execute('''
             INSERT INTO subscriptions
             (phone, morning_train, evening_train, delay_alerts, ontime_alerts,
-             verification_code, status, station, ntfy_topic, morning_trains, evening_trains)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             verification_code, status, station, ntfy_topic, morning_trains, evening_trains,
+             evening_hub)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ''', (phone, morning_train, evening_train, delay_alerts, ontime_alerts,
               verification_code, initial_status, station, ntfy_topic,
-              json.dumps(m_trains), json.dumps(e_trains)))
+              json.dumps(m_trains), json.dumps(e_trains), evening_hub))
 
         conn.commit()
         label = phone or 'no-phone'
@@ -124,11 +128,11 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
             UPDATE subscriptions
             SET morning_train=%s, evening_train=%s, delay_alerts=%s, ontime_alerts=%s,
                 verification_code=%s, status=%s, updated_at=%s, station=%s, ntfy_topic=%s,
-                morning_trains=%s, evening_trains=%s
+                morning_trains=%s, evening_trains=%s, evening_hub=%s
             WHERE phone=%s
         ''', (morning_train, evening_train, delay_alerts, ontime_alerts,
               verification_code, initial_status, datetime.now(), station, ntfy_topic,
-              json.dumps(m_trains), json.dumps(e_trains), phone))
+              json.dumps(m_trains), json.dumps(e_trains), evening_hub, phone))
 
         conn.commit()
         action = 'reactivated' if reactivated else 'updated'

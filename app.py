@@ -100,6 +100,7 @@ class SubscribeRequest(BaseModel):
     delay_alerts: bool = True
     ontime_alerts: bool = True
     station: str = ''  # 2-char NJT station code for home station (e.g. 'PJ')
+    evening_hub: Optional[str] = None  # 'HB'=Hoboken, 'SE'=Secaucus (ML/BC/PV lines only)
 
 class VerifyRequest(BaseModel):
     phone: str
@@ -115,6 +116,7 @@ class SubscribeVerifyChangeRequest(BaseModel):
     delay_alerts: bool = True
     ontime_alerts: bool = True
     station: str = ''
+    evening_hub: Optional[str] = None
 
 
 # API Endpoints
@@ -170,7 +172,8 @@ def subscribe(request: SubscribeRequest):
             ontime_alerts=request.ontime_alerts,
             station=request.station,
             morning_trains=morning_trains,
-            evening_trains=evening_trains
+            evening_trains=evening_trains,
+            evening_hub=request.evening_hub
         )
 
         ntfy_topic = result['ntfy_topic']
@@ -249,7 +252,8 @@ def subscribe_verify_change(request: SubscribeVerifyChangeRequest):
             ontime_alerts=request.ontime_alerts,
             station=request.station,
             morning_trains=morning_trains,
-            evening_trains=evening_trains
+            evening_trains=evening_trains,
+            evening_hub=request.evening_hub
         )
 
         ntfy_topic = result['ntfy_topic']
@@ -336,11 +340,11 @@ def _representative_date(schedule: str) -> date:
 
 
 @app.get("/trains/{station_code}")
-def get_station_trains(station_code: str, schedule: str = 'weekday'):
-    """Get trains for a specific station. schedule=weekday|saturday|sunday"""
+def get_station_trains(station_code: str, schedule: str = 'weekday', hub: Optional[str] = None):
+    """Get trains for a specific station. schedule=weekday|saturday|sunday, hub=HB|SE"""
     try:
         query_date = _representative_date(schedule)
-        trains_data = nj_transit.get_station_schedule(station_code, query_date=query_date)
+        trains_data = nj_transit.get_station_schedule(station_code, query_date=query_date, preferred_hub=hub)
         return trains_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
