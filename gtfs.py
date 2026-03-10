@@ -488,9 +488,36 @@ def _map_njt_codes():
 
     for njt_code, stop_id in updates:
         c.execute('UPDATE gtfs_stops SET njt_code = %s WHERE stop_id = %s', (njt_code, stop_id))
+
+    # Hardcoded overrides for stations where name matching fails or produces wrong results.
+    # GTFS names differ from NJT API names (abbreviations, suffixes, etc.).
+    # None = clear an incorrectly-assigned code.
+    _GTFS_OVERRIDES = {
+        'ATLANTIC CITY': 'AC',
+        'EGG HARBOR': 'EH',
+        'JERSEY AVE.': 'JA',
+        'MSU': 'UV',                             # Montclair State University
+        'NEWARK AIRPORT RAILROAD STATION': 'NA',
+        'NEWARK BROAD ST': 'ND',
+        'POINT PLEASANT': 'PP',
+        'RAMSEY': 'RM',
+        'RAMSEY ROUTE 17 STATION': 'RY',
+        'SECAUCUS LOWER LEVEL': 'SE',
+        'SECAUCUS UPPER LEVEL': 'SE',
+        '30TH ST. PHL.': 'PH',
+        'HARRIMAN': None,                        # was incorrectly assigned RM
+    }
+    override_count = 0
+    for gtfs_name, override_code in _GTFS_OVERRIDES.items():
+        c.execute(
+            'UPDATE gtfs_stops SET njt_code = %s WHERE UPPER(stop_name) = %s',
+            (override_code, gtfs_name.upper())
+        )
+        override_count += c.rowcount
+
     conn.commit()
     conn.close()
-    print(f"  ✅ Mapped {len(updates)}/{len(stops)} stops to NJT 2-char codes")
+    print(f"  ✅ Mapped {len(updates)}/{len(stops)} stops to NJT 2-char codes ({override_count} override(s) applied)")
 
 
 def _load_calendar_dates(zf: zipfile.ZipFile):
