@@ -4,6 +4,7 @@ Handles subscription, verification, and unsubscribe
 """
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from typing import Optional
@@ -46,6 +47,10 @@ def on_startup():
     """On startup: kick off GTFS data load in the background (non-blocking)."""
     print("🚀 App startup — triggering GTFS load in background thread...")
     gtfs.load_or_refresh_background()
+    # Initialize feature flags with defaults on first run
+    if cache_get('lirr_enabled') is None:
+        cache_set('lirr_enabled', True, ttl_hours=8760)
+        print("✅ Feature flag 'lirr_enabled' initialized to True")
 
 # Enable CORS for frontend
 app.add_middleware(
@@ -683,6 +688,83 @@ def service_alerts_disable(username: str = Depends(verify_admin)):
     from cache import cache_set as _cache_set
     _cache_set('service_alerts_enabled', False, ttl_hours=8760)
     return {"service_alerts_enabled": False, "message": "Service alerts disabled"}
+
+# ========== PUBLIC CONFIG / FEATURE FLAGS ==========
+
+@app.get("/config")
+def get_config():
+    """Public: feature flag values for the frontend."""
+    lirr_enabled = cache_get('lirr_enabled')
+    return {"lirr_enabled": bool(lirr_enabled) if lirr_enabled is not None else True}
+
+
+# ========== ADMIN FEATURE FLAGS ==========
+
+@app.get("/admin/features", response_class=HTMLResponse)
+def admin_features_page(username: str = Depends(verify_admin)):
+    """Admin: HTML page to manage feature flags."""
+    lirr_enabled = cache_get('lirr_enabled')
+    lirr_on = bool(lirr_enabled) if lirr_enabled is not None else True
+    status = "✅ Enabled" if lirr_on else "❌ Disabled"
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Feature Flags — Admin</title>
+<style>
+  body{{font-family:sans-serif;max-width:640px;margin:2rem auto;padding:1rem;background:#f5f5f5;color:#333}}
+  h1{{margin-bottom:1.5rem}}
+  .flag{{background:#fff;padding:1rem 1.25rem;border-radius:10px;margin:1rem 0;display:flex;align-items:center;justify-content:space-between;box-shadow:0 1px 4px rgba(0,0,0,0.08)}}
+  .flag-info strong{{display:block;margin-bottom:0.2rem}}
+  .flag-info small{{color:#666;font-size:0.82rem}}
+  .btns{{display:flex;gap:0.5rem}}
+  button{{padding:0.45rem 0.9rem;border:none;border-radius:6px;cursor:pointer;font-size:0.85rem;font-weight:600}}
+  .enable{{background:#43a047;color:#fff}}.disable{{background:#e53935;color:#fff}}
+  .back{{display:inline-block;margin-top:1rem;color:#1976D2;font-size:0.9rem;text-decoration:none}}
+  .msg{{padding:0.6rem 1rem;background:#E8F5E9;border-radius:6px;margin:0.5rem 0;display:none;font-size:0.9rem}}
+</style></head>
+<body>
+<h1>⚙️ Feature Flags</h1>
+<div class="flag">
+  <div class="flag-info">
+    <strong>🚇 LIRR Support</strong>
+    <small id="lirr-status">{status} — shows LIRR "Coming Soon" toggle in frontend</small>
+  </div>
+  <div class="btns">
+    <button class="enable" onclick="setFlag('lirr','enable')">Enable</button>
+    <button class="disable" onclick="setFlag('lirr','disable')">Disable</button>
+  </div>
+</div>
+<div class="msg" id="msg"></div>
+<a href="/admin/subscriptions" class="back">← Admin Home</a>
+<script>
+async function setFlag(flag, action) {{
+  const res = await fetch(`/admin/features/${{flag}}/${{action}}`, {{method:'POST'}});
+  const data = await res.json();
+  const msg = document.getElementById('msg');
+  msg.style.display = 'block';
+  msg.textContent = data.message || (action==='enable' ? 'Enabled!' : 'Disabled!');
+  if (flag === 'lirr') {{
+    document.getElementById('lirr-status').textContent =
+      (action==='enable' ? '✅ Enabled' : '❌ Disabled') +
+      ' — shows LIRR "Coming Soon" toggle in frontend';
+  }}
+  setTimeout(() => {{ msg.style.display='none'; }}, 3000);
+}}
+</script>
+</body></html>""")
+
+
+@app.post("/admin/features/lirr/enable")
+def admin_lirr_enable(username: str = Depends(verify_admin)):
+    """Admin: Enable LIRR feature flag (shows Coming Soon UI in frontend)."""
+    cache_set('lirr_enabled', True, ttl_hours=8760)
+    return {"lirr_enabled": True, "message": "LIRR feature enabled — frontend will show Coming Soon toggle"}
+
+
+@app.post("/admin/features/lirr/disable")
+def admin_lirr_disable(username: str = Depends(verify_admin)):
+    """Admin: Disable LIRR feature flag (hides LIRR from frontend entirely)."""
+    cache_set('lirr_enabled', False, ttl_hours=8760)
+    return {"lirr_enabled": False, "message": "LIRR feature disabled — hidden from frontend"}
+
 
 # ================================================
 
