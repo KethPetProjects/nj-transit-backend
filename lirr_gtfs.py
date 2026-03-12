@@ -128,11 +128,11 @@ def _needs_refresh() -> bool:
     last = get_last_updated()
     if not last:
         return True
-    # Force re-download if lirr_calendar table is empty (schema migration)
+    # Force re-download if lirr_stop_times is empty (fresh DB or schema migration)
     try:
         conn = get_connection()
         c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM lirr_calendar")
+        c.execute("SELECT COUNT(*) FROM lirr_stop_times")
         count = c.fetchone()[0]
         conn.close()
         if count == 0:
