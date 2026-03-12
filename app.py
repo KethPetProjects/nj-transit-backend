@@ -33,6 +33,7 @@ from cache import cache_set, cache_get
 from notifications import SMSService
 from njtransit import NJTransitAPI
 import gtfs
+import lirr_gtfs
 
 app = FastAPI(title="NJ Transit Delay Alerts API")
 
@@ -47,6 +48,7 @@ def on_startup():
     """On startup: kick off GTFS data load in the background (non-blocking)."""
     print("🚀 App startup — triggering GTFS load in background thread...")
     gtfs.load_or_refresh_background()
+    lirr_gtfs.load_or_refresh_background()
     # Initialize feature flags with defaults on first run
     if cache_get('lirr_enabled') is None:
         cache_set('lirr_enabled', True, ttl_hours=8760)
@@ -104,8 +106,9 @@ class SubscribeRequest(BaseModel):
     evening_trains: list = [] # up to 3 evening trains in priority order
     delay_alerts: bool = True
     ontime_alerts: bool = True
-    station: str = ''  # 2-char NJT station code for home station (e.g. 'PJ')
-    evening_hub: Optional[str] = None  # 'HB'=Hoboken, 'SE'=Secaucus (ML/BC/PV lines only)
+    station: str = ''  # 2-char NJT station code OR LIRR stop_id for home station
+    evening_hub: Optional[str] = None  # 'HB'=Hoboken, 'SE'=Secaucus (NJT ML/BC/PV only)
+    rail_system: str = 'NJT'  # 'NJT' or 'LIRR'
 
 class VerifyRequest(BaseModel):
     phone: str
@@ -122,6 +125,7 @@ class SubscribeVerifyChangeRequest(BaseModel):
     ontime_alerts: bool = True
     station: str = ''
     evening_hub: Optional[str] = None
+    rail_system: str = 'NJT'
 
 
 # API Endpoints
@@ -178,7 +182,8 @@ def subscribe(request: SubscribeRequest):
             station=request.station,
             morning_trains=morning_trains,
             evening_trains=evening_trains,
-            evening_hub=request.evening_hub
+            evening_hub=request.evening_hub,
+            rail_system=request.rail_system
         )
 
         ntfy_topic = result['ntfy_topic']
@@ -258,7 +263,8 @@ def subscribe_verify_change(request: SubscribeVerifyChangeRequest):
             station=request.station,
             morning_trains=morning_trains,
             evening_trains=evening_trains,
-            evening_hub=request.evening_hub
+            evening_hub=request.evening_hub,
+            rail_system=request.rail_system
         )
 
         ntfy_topic = result['ntfy_topic']
@@ -353,6 +359,45 @@ def get_station_trains(station_code: str, schedule: str = 'weekday', hub: Option
         return trains_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ========== LIRR ENDPOINTS ==========
+
+@app.get("/lirr/stations")
+def get_lirr_stations():
+    """Get Port Washington Branch stations for the LIRR subscription UI."""
+    try:
+        stations = lirr_gtfs.get_port_washington_stations()
+        return {"stations": stations, "branch": "Port Washington"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/lirr/trains/{stop_id}")
+def get_lirr_trains(stop_id: str, schedule: str = 'weekday'):
+    """
+    Get outbound (to Penn) and inbound (from Penn) trains for a Port Washington stop.
+    schedule=weekday|saturday|sunday
+    """
+    try:
+        query_date = _representative_date(schedule)
+        trains = lirr_gtfs.get_station_schedule(stop_id, query_date=query_date)
+        return trains
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/lirr/status")
+def admin_lirr_gtfs_status(username: str = Depends(verify_admin)):
+    """Admin: Show LIRR GTFS data status."""
+    return lirr_gtfs.get_status()
+
+
+@app.get("/admin/lirr/refresh")
+def admin_lirr_gtfs_refresh(username: str = Depends(verify_admin)):
+    """Admin: Force re-download of LIRR GTFS data."""
+    lirr_gtfs.load_or_refresh_background()
+    return {"status": "refresh_started", "message": "LIRR GTFS refresh triggered in background"}
+
 
 @app.get("/stats")
 def get_stats():
@@ -747,7 +792,7 @@ def admin_features_page(username: str = Depends(verify_admin)):
 <div class="flag">
   <div class="flag-info">
     <strong>🚇 LIRR Support</strong>
-    <small id="lirr-status">{status} — shows LIRR "Coming Soon" toggle in frontend</small>
+    <small id="lirr-status">{status} — shows LIRR Port Washington Branch toggle in frontend</small>
   </div>
   <div class="btns">
     <button class="enable" onclick="setFlag('lirr','enable')">Enable</button>
@@ -766,7 +811,7 @@ async function setFlag(flag, action) {{
   if (flag === 'lirr') {{
     document.getElementById('lirr-status').textContent =
       (action==='enable' ? '✅ Enabled' : '❌ Disabled') +
-      ' — shows LIRR "Coming Soon" toggle in frontend';
+      ' — shows LIRR Port Washington Branch toggle in frontend';
   }}
   setTimeout(() => {{ msg.style.display='none'; }}, 3000);
 }}

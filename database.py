@@ -50,6 +50,8 @@ def init_db():
         c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS evening_trains JSONB")
         # Migration: add evening_hub (HB=Hoboken, SE=Secaucus, NULL=not applicable)
         c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS evening_hub TEXT")
+        # Migration: add rail_system ('NJT' or 'LIRR')
+        c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS rail_system TEXT DEFAULT 'NJT'")
         # Backfill: wrap existing single train into 1-element array for existing rows
         c.execute("""
             UPDATE subscriptions
@@ -74,7 +76,8 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
                      ontime_alerts: bool = True, station: str = '',
                      morning_trains: Optional[List[str]] = None,
                      evening_trains: Optional[List[str]] = None,
-                     evening_hub: Optional[str] = None) -> dict:
+                     evening_hub: Optional[str] = None,
+                     rail_system: str = 'NJT') -> dict:
     """
     Save a new subscription.
     morning_trains / evening_trains: ordered list of up to 3 train numbers.
@@ -104,11 +107,11 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
             INSERT INTO subscriptions
             (phone, morning_train, evening_train, delay_alerts, ontime_alerts,
              verification_code, status, station, ntfy_topic, morning_trains, evening_trains,
-             evening_hub)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             evening_hub, rail_system)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ''', (phone, morning_train, evening_train, delay_alerts, ontime_alerts,
               verification_code, initial_status, station, ntfy_topic,
-              json.dumps(m_trains), json.dumps(e_trains), evening_hub))
+              json.dumps(m_trains), json.dumps(e_trains), evening_hub, rail_system))
 
         conn.commit()
         label = phone or 'no-phone'
@@ -128,11 +131,11 @@ def save_subscription(phone: Optional[str] = None, morning_train: str = '',
             UPDATE subscriptions
             SET morning_train=%s, evening_train=%s, delay_alerts=%s, ontime_alerts=%s,
                 verification_code=%s, status=%s, updated_at=%s, station=%s, ntfy_topic=%s,
-                morning_trains=%s, evening_trains=%s, evening_hub=%s
+                morning_trains=%s, evening_trains=%s, evening_hub=%s, rail_system=%s
             WHERE phone=%s
         ''', (morning_train, evening_train, delay_alerts, ontime_alerts,
               verification_code, initial_status, datetime.now(), station, ntfy_topic,
-              json.dumps(m_trains), json.dumps(e_trains), evening_hub, phone))
+              json.dumps(m_trains), json.dumps(e_trains), evening_hub, rail_system, phone))
 
         conn.commit()
         action = 'reactivated' if reactivated else 'updated'
@@ -175,7 +178,7 @@ def get_active_subscriptions() -> List[Dict]:
     
     c.execute('''
         SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts,
-               station, ntfy_topic, morning_trains, evening_trains
+               station, ntfy_topic, morning_trains, evening_trains, rail_system
         FROM subscriptions
         WHERE status='active'
     ''')
@@ -195,7 +198,7 @@ def get_subscription(phone: str) -> Optional[Dict]:
     
     c.execute('''
         SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts,
-               status, station, ntfy_topic, morning_trains, evening_trains
+               status, station, ntfy_topic, morning_trains, evening_trains, rail_system
         FROM subscriptions
         WHERE phone=%s
     ''', (phone,))
@@ -229,7 +232,7 @@ def get_subscription_by_topic(topic: str) -> Optional[Dict]:
     c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute('''
         SELECT phone, morning_train, evening_train, delay_alerts, ontime_alerts,
-               status, station, ntfy_topic, morning_trains, evening_trains
+               status, station, ntfy_topic, morning_trains, evening_trains, rail_system
         FROM subscriptions
         WHERE ntfy_topic=%s
     ''', (topic,))
@@ -281,6 +284,13 @@ def init_gtfs_tables():
     _gtfs.init_gtfs_tables()
 
 
+def init_lirr_tables():
+    """Create LIRR GTFS tables — delegates to lirr_gtfs module."""
+    import lirr_gtfs as _lirr
+    _lirr.init_lirr_tables()
+
+
 # Initialize database on import
 init_db()
 init_gtfs_tables()
+init_lirr_tables()

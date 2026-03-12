@@ -11,6 +11,7 @@ from database import get_active_subscriptions
 from njtransit import NJTransitAPI
 from notifications import SMSService
 from cache import cache_get, cache_set
+import lirr_realtime
 
 # Container runs in UTC but all NJT/GTFS times are Eastern — use Eastern throughout
 EASTERN = ZoneInfo('America/New_York')
@@ -116,7 +117,8 @@ def check_trains():
         return
 
     print(f"\n🔍 [{now.strftime('%H:%M:%S')}] Checking trains...")
-    nj_transit.clear_cycle_cache()  # fresh station data each cycle
+    nj_transit.clear_cycle_cache()     # fresh NJT station data each cycle
+    lirr_realtime.clear_cycle_cache()  # fresh LIRR RT feed each cycle
 
     try:
         subscriptions = get_active_subscriptions()
@@ -171,6 +173,7 @@ def check_subscriber_trains(sub: dict):
     phone = sub['phone']
     home_station = sub.get('station') or ''
     ntfy_topic = sub.get('ntfy_topic') or None
+    rail_system = sub.get('rail_system') or 'NJT'
     manage_url = f"https://black-plant-0162ad510.4.azurestaticapps.net/?topic={ntfy_topic}" if ntfy_topic else None
 
     # Use new multi-train columns, fall back to old single-train columns
@@ -182,13 +185,19 @@ def check_subscriber_trains(sub: dict):
     morning_station_name = ''
     evening_station_name = ''
     try:
-        import gtfs as _gtfs
-        if home_station:
-            morning_station_name = _gtfs.get_station_name(home_station) or home_station
-        if evening_trains:
-            origin_code = _gtfs.get_train_origin_njt_code(evening_trains[0])
-            if origin_code:
-                evening_station_name = _gtfs.get_station_name(origin_code) or ''
+        if rail_system == 'LIRR':
+            import lirr_gtfs as _lirr
+            if home_station:
+                morning_station_name = _lirr.get_station_name(home_station) or home_station
+            evening_station_name = 'Penn Station NY'
+        else:
+            import gtfs as _gtfs
+            if home_station:
+                morning_station_name = _gtfs.get_station_name(home_station) or home_station
+            if evening_trains:
+                origin_code = _gtfs.get_train_origin_njt_code(evening_trains[0])
+                if origin_code:
+                    evening_station_name = _gtfs.get_station_name(origin_code) or ''
     except Exception:
         pass
 
@@ -203,7 +212,8 @@ def check_subscriber_trains(sub: dict):
             station=home_station,
             station_name=morning_station_name,
             ntfy_topic=ntfy_topic,
-            manage_url=manage_url
+            manage_url=manage_url,
+            rail_system=rail_system
         )
 
     if evening_trains and EVENING_START <= now_hour < EVENING_END:
@@ -215,12 +225,11 @@ def check_subscriber_trains(sub: dict):
             station='',
             station_name=evening_station_name,
             ntfy_topic=ntfy_topic,
-            manage_url=manage_url
+            manage_url=manage_url,
+            rail_system=rail_system
         )
-        # Arrival alerts — all subscribed evening trains, always on by default
-        # Family sees alerts for each train ~30 min before arrival, naturally
-        # spaced apart — covers whichever train the subscriber actually boarded.
-        if home_station:
+        # Arrival alerts — NJT only (uses NJT getTrainSchedule API at home station)
+        if home_station and rail_system == 'NJT':
             for t in evening_trains:
                 check_arrival_alert(
                     phone=phone,
@@ -259,18 +268,24 @@ def _gtfs_departure(train_number: str, station: str):
     return None
 
 
-def _in_check_window(train_number: str, station: str) -> bool:
+def _in_check_window(train_number: str, station: str, rail_system: str = 'NJT') -> bool:
     """
     Return True if this train should be checked right now.
 
     Start: 35 min before scheduled departure — ensures we capture the
            25–35 min on-time alert window.
-    Stop:  90 min after scheduled departure — covers virtually all NJT
-           delays. Train status 'not_scheduled' (departed) naturally
-           produces no alert, so extra checks near the boundary are harmless.
+    Stop:  90 min after scheduled departure — covers virtually all delays.
     Fallback: if GTFS has no departure time, always check (safe default).
     """
-    dep = _gtfs_departure(train_number, station)
+    if rail_system == 'LIRR':
+        try:
+            import lirr_gtfs as _lirr
+            dep = _lirr.get_train_departure_today(train_number)
+        except Exception:
+            dep = None
+    else:
+        dep = _gtfs_departure(train_number, station)
+
     if dep is None:
         return True  # no GTFS data — don't skip
     minutes_until = (dep - _now_et()).total_seconds() / 60
@@ -279,7 +294,8 @@ def _in_check_window(train_number: str, station: str) -> bool:
 
 def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: bool,
                       station: str = '', station_name: str = '',
-                      ntfy_topic: str = None, manage_url: str = None):
+                      ntfy_topic: str = None, manage_url: str = None,
+                      rail_system: str = 'NJT'):
     """
     Check up to 3 trains with cascade alerts.
     - Delay/cancel on any train includes status snapshot of the remaining trains.
@@ -292,7 +308,7 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
     # Filter to trains within their active check window before hitting the API.
     # Window: 35 min before departure → 90 min after (covers delays up to 90 min).
     # Trains outside this window are skipped entirely — no API call made.
-    active_trains = [t for t in trains if _in_check_window(t, station)]
+    active_trains = [t for t in trains if _in_check_window(t, station, rail_system)]
     skipped = set(trains) - set(active_trains)
     for t in skipped:
         dep = _gtfs_departure(t, station)
@@ -303,10 +319,13 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
         return
 
     # Fetch all statuses upfront so context lines are always current.
-    # Pass the boarding station for morning trains so track + departure time
-    # reflect the user's stop, not the train's origin further down the line.
-    query_st = station or None
-    statuses = [(t, nj_transit.get_train_status(t, query_station=query_st)) for t in active_trains]
+    if rail_system == 'LIRR':
+        statuses = [(t, lirr_realtime.get_train_status(t)) for t in active_trains]
+    else:
+        # Pass the boarding station for morning trains so track + departure time
+        # reflect the user's stop, not the train's origin further down the line.
+        query_st = station or None
+        statuses = [(t, nj_transit.get_train_status(t, query_station=query_st)) for t in active_trains]
 
     for i, (train_number, status) in enumerate(statuses):
         context = statuses[i + 1:]  # remaining trains shown as backup context
@@ -377,7 +396,7 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
         # ── On-time alert (30-min window) ───────────────────────────────────
         elif status['on_time'] and send_ontime:
             scheduled = status['scheduled_departure']
-            if station:
+            if station and rail_system == 'NJT':
                 try:
                     import gtfs as _gtfs
                     gtfs_time = _gtfs.get_train_departure_at_station(train_number, station)
