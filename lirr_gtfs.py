@@ -430,7 +430,7 @@ def _get_service_ids_for_date(c, query_date: date) -> list:
         SELECT service_id FROM lirr_calendar
         WHERE {day_col} = 1 AND start_date <= %s AND end_date >= %s
     """, (query_date, query_date))
-    service_ids = {r[0] for r in c.fetchall()}
+    service_ids = {r['service_id'] for r in c.fetchall()}
 
     # 2. Apply exceptions: add exception_type=1, remove exception_type=2
     c.execute("""
@@ -438,10 +438,10 @@ def _get_service_ids_for_date(c, query_date: date) -> list:
         WHERE date = %s
     """, (query_date,))
     for row in c.fetchall():
-        if row[1] == 1:
-            service_ids.add(row[0])
-        elif row[1] == 2:
-            service_ids.discard(row[0])
+        if row['exception_type'] == 1:
+            service_ids.add(row['service_id'])
+        elif row['exception_type'] == 2:
+            service_ids.discard(row['service_id'])
 
     return list(service_ids)
 
