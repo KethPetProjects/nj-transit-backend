@@ -25,6 +25,8 @@ COPY njtransit.py .
 COPY notifications.py .
 COPY cache.py .
 COPY gtfs.py .
+COPY lirr_gtfs.py .
+COPY lirr_realtime.py .
 
 # Expose port 8000 for the API
 EXPOSE 8000
