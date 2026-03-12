@@ -689,6 +689,28 @@ def service_alerts_disable(username: str = Depends(verify_admin)):
     _cache_set('service_alerts_enabled', False, ttl_hours=8760)
     return {"service_alerts_enabled": False, "message": "Service alerts disabled"}
 
+# ========== ADMIN TEST ENDPOINTS ==========
+
+@app.get("/admin/test/arrival-alert/{phone}")
+def admin_test_arrival_alert(phone: str, username: str = Depends(verify_admin)):
+    """Admin: Send a mock arrival notification to a subscriber's ntfy topic."""
+    from database import get_subscription
+    normalized = '+1' + phone.replace('+1', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+    sub = get_subscription(normalized)
+    if not sub or not sub.get('ntfy_topic'):
+        raise HTTPException(status_code=404, detail="Subscription not found or no ntfy topic")
+    topic = sub['ntfy_topic']
+    manage_url = f"{FRONTEND_URL}/?topic={topic}"
+    sms_service._send_ntfy(
+        title="Train 3832 — Arrives Edison at 6:57 PM (on time) [TEST]",
+        message="Arrives at Edison at 6:57 PM — on time [this is a test notification]",
+        priority="default",
+        topic=topic,
+        click_url=manage_url
+    )
+    return {"status": "sent", "ntfy_topic": topic, "phone": normalized}
+
+
 # ========== PUBLIC CONFIG / FEATURE FLAGS ==========
 
 @app.get("/config")
