@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from database import get_active_subscriptions
 from njtransit import NJTransitAPI
 from notifications import SMSService
-from cache import cache_get
+from cache import cache_get, cache_set
 
 # Container runs in UTC but all NJT/GTFS times are Eastern — use Eastern throughout
 EASTERN = ZoneInfo('America/New_York')
@@ -217,6 +217,16 @@ def check_subscriber_trains(sub: dict):
             ntfy_topic=ntfy_topic,
             manage_url=manage_url
         )
+        # Arrival alert — first evening train only, always on by default
+        if home_station:
+            check_arrival_alert(
+                phone=phone,
+                train_number=evening_trains[0],
+                home_station=home_station,
+                home_station_name=morning_station_name,
+                ntfy_topic=ntfy_topic,
+                manage_url=manage_url
+            )
 
 
 def _dep_str(scheduled) -> str:
@@ -392,6 +402,80 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
 
         else:
             print(f"   ℹ️  Train {train_number} status: {status['status']} (no alert needed)")
+
+def check_arrival_alert(phone: str, train_number: str, home_station: str,
+                         home_station_name: str, ntfy_topic: str, manage_url: str):
+    """
+    Send an arrival notification for the first evening train ~30 min before it
+    reaches the subscriber's home station.
+
+    Uses getTrainSchedule(home_station) so SEC_LATE reflects the delay at that
+    specific stop — mid-journey slowdowns are captured as the train progresses.
+
+    Sends at most 2 alerts per train per day:
+      1. Initial — when ETA first enters the ≤30 min window
+      2. Revision — if ETA shifts ≥5 min after the initial alert (delay worsened
+         or train recovered)
+    """
+    if not home_station or not ntfy_topic:
+        return
+
+    result = nj_transit.get_arrival_eta_at_station(train_number, home_station)
+    if not result:
+        return
+
+    eta = result['eta']
+    delay_minutes = result['delay_minutes']
+    now = _now_et()
+    minutes_away = (eta - now).total_seconds() / 60
+
+    # Only act when ETA is ≤30 min and still in the future
+    if not (0 < minutes_away <= 30):
+        return
+
+    eta_str = eta.strftime('%I:%M %p').lstrip('0')
+    eta_min_of_day = eta.hour * 60 + eta.minute
+    station_label = f" at {home_station_name}" if home_station_name else ''
+
+    today_str = now.strftime('%Y-%m-%d')
+    cache_key = f"arrival_notif_{phone}_{train_number}_{today_str}"
+    state = cache_get(cache_key) or {}
+
+    sent_count = state.get('count', 0)
+    last_eta_min = state.get('last_eta_min')
+
+    if sent_count == 0:
+        # Initial arrival alert
+        if delay_minutes > 0:
+            title = f"Train {train_number} — Arrives {eta_str} ({delay_minutes} min late)"
+            msg   = f"Arrives{station_label} at {eta_str} — {delay_minutes} min late"
+        else:
+            title = f"Train {train_number} — Arrives {eta_str} (on time)"
+            msg   = f"Arrives{station_label} at {eta_str} — on time"
+
+        print(f"   🏠 Arrival alert: Train {train_number} → {home_station} in ~{minutes_away:.0f} min")
+        sms_service._send_ntfy(title=title, message=msg, priority="default",
+                               topic=ntfy_topic, click_url=manage_url)
+        cache_set(cache_key, {'count': 1, 'last_eta_min': eta_min_of_day}, ttl_hours=8)
+
+    elif sent_count == 1 and last_eta_min is not None:
+        # Revision: only if ETA shifted ≥5 min from what we told the family
+        shift = abs(eta_min_of_day - last_eta_min)
+        if shift >= 5:
+            if delay_minutes > 0:
+                title = f"Train {train_number} — Revised arrival {eta_str} ({delay_minutes} min late)"
+                msg   = f"Revised: arrives{station_label} at {eta_str} — now {delay_minutes} min late"
+            else:
+                title = f"Train {train_number} — Back on time, arrives {eta_str}"
+                msg   = f"Back on track — arrives{station_label} at {eta_str} on time"
+
+            print(f"   🔄 Revised arrival: Train {train_number} ETA shifted {shift} min → {home_station}")
+            sms_service._send_ntfy(title=title, message=msg, priority="default",
+                                   topic=ntfy_topic, click_url=manage_url)
+            cache_set(cache_key, {'count': 2, 'last_eta_min': eta_min_of_day}, ttl_hours=8)
+
+    # sent_count >= 2: cap reached, no more arrival alerts today
+
 
 def cleanup_old_alerts():
     """Clean up old alert tracking and track assignments (runs daily)"""

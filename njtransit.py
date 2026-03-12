@@ -392,6 +392,73 @@ class NJTransitAPI:
                 'status': 'cancelled'
             }
     
+    # Destinations that identify an outbound train (toward NYC) — used to reject
+    # wrong-direction results when querying arrival ETA at the home station.
+    _NYC_HUB_KEYWORDS = ['penn', 'new york', 'hoboken', 'secaucus', 'jersey city']
+
+    def get_arrival_eta_at_station(self, train_number: str, station_code: str):
+        """
+        Get real-time ETA for a train arriving at a specific station.
+        Queries getTrainSchedule(station_code) — the API returns SCHED_DEP_DATE
+        and SEC_LATE *at that specific stop*, so mid-journey delays are reflected.
+
+        Safety check: rejects the result if DESTINATION is a NYC hub (wrong direction).
+
+        Returns dict {scheduled, eta, delay_minutes} or None if not found/wrong direction.
+        """
+        if not self.username or not self.password:
+            return None
+
+        token = self.get_token()
+        if not token:
+            return None
+
+        # Reuse per-cycle station cache — shared with morning get_train_status calls
+        cached = _station_cache.get(station_code)
+        if cached:
+            items = cached
+            print(f"   ✅ [{station_code}] Reusing cycle-cached data for arrival check on train {train_number}")
+        else:
+            url = f"{self.base_url}/getTrainSchedule"
+            files = {'token': (None, token), 'station': (None, station_code)}
+            try:
+                response = requests.post(url, files=files)
+                response.raise_for_status()
+                items = response.json().get('ITEMS', [])
+                _station_cache[station_code] = items
+                print(f"   🌐 [{station_code}] Fetched station data for arrival check ({len(items)} trains)")
+            except Exception as e:
+                print(f"❌ Error fetching arrival data at {station_code}: {e}")
+                return None
+
+        for train in items:
+            if train.get('TRAIN_ID') != train_number:
+                continue
+
+            # Safety: reject if heading toward NYC (outbound train, wrong direction)
+            destination = train.get('DESTINATION', '').lower()
+            if any(hub in destination for hub in self._NYC_HUB_KEYWORDS):
+                print(f"   ⏭️  Train {train_number} at {station_code}: outbound (→ {destination}) — skipping")
+                return None
+
+            sec_late = int(train.get('SEC_LATE', 0))
+            sched_dep_str = train.get('SCHED_DEP_DATE', '')
+            try:
+                scheduled = datetime.strptime(sched_dep_str, '%d-%b-%Y %I:%M:%S %p')
+            except Exception:
+                print(f"   ⚠️  Train {train_number}: couldn't parse scheduled time '{sched_dep_str}'")
+                return None
+
+            eta = scheduled + timedelta(seconds=sec_late)
+            return {
+                'scheduled': scheduled,
+                'eta': eta,
+                'delay_minutes': sec_late // 60,
+            }
+
+        print(f"   ℹ️  Train {train_number} not found at {station_code} for arrival check")
+        return None
+
     def get_available_trains(self, direction: str = 'outbound') -> List[Dict]:
         """
         Get list of available trains
