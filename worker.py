@@ -217,16 +217,19 @@ def check_subscriber_trains(sub: dict):
             ntfy_topic=ntfy_topic,
             manage_url=manage_url
         )
-        # Arrival alert — first evening train only, always on by default
+        # Arrival alerts — all subscribed evening trains, always on by default
+        # Family sees alerts for each train ~30 min before arrival, naturally
+        # spaced apart — covers whichever train the subscriber actually boarded.
         if home_station:
-            check_arrival_alert(
-                phone=phone,
-                train_number=evening_trains[0],
-                home_station=home_station,
-                home_station_name=morning_station_name,
-                ntfy_topic=ntfy_topic,
-                manage_url=manage_url
-            )
+            for t in evening_trains:
+                check_arrival_alert(
+                    phone=phone,
+                    train_number=t,
+                    home_station=home_station,
+                    home_station_name=morning_station_name,
+                    ntfy_topic=ntfy_topic,
+                    manage_url=manage_url
+                )
 
 
 def _dep_str(scheduled) -> str:
