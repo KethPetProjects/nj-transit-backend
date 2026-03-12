@@ -399,6 +399,22 @@ def admin_lirr_gtfs_refresh(username: str = Depends(verify_admin)):
     return {"status": "refresh_started", "message": "LIRR GTFS refresh triggered in background"}
 
 
+@app.get("/lirr/debug/{stop_id}")
+def lirr_debug(stop_id: str):
+    """Temporary debug: show raw DB counts for a stop_id."""
+    import psycopg2, os
+    conn = psycopg2.connect(os.environ['DATABASE_URL'])
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM lirr_stop_times WHERE stop_id=%s", (stop_id,))
+    st_count = c.fetchone()[0]
+    c.execute("SELECT DISTINCT t.service_id, COUNT(*) FROM lirr_trips t JOIN lirr_stop_times st ON t.trip_id=st.trip_id WHERE st.stop_id=%s GROUP BY t.service_id", (stop_id,))
+    sids = c.fetchall()
+    c.execute("SELECT service_id FROM lirr_calendar_dates WHERE date=CURRENT_DATE AND exception_type=1")
+    today_sids = [r[0] for r in c.fetchall()]
+    conn.close()
+    return {"stop_id": stop_id, "stop_times_count": st_count, "service_ids_in_db": sids, "today_service_ids": today_sids}
+
+
 @app.get("/stats")
 def get_stats():
     """Get service statistics"""
