@@ -1,15 +1,15 @@
 """
-LIRR GTFS Static Schedule — Port Washington Branch
-Downloads MTA LIRR GTFS zip, parses Port Washington Branch, stores in PostgreSQL.
-Exposes get_station_schedule() for the subscription UI and arrival checks.
+LIRR GTFS Static Schedule — Babylon, Ronkonkoma, and Port Washington branches.
+Downloads MTA LIRR GTFS zip, parses Penn-serving trips for all three branches,
+stores in PostgreSQL.
 
 Direction convention (MTA LIRR GTFS):
-  direction_id=0 = outbound (away from Manhattan, toward Port Washington)
-  direction_id=1 = inbound  (toward Manhattan, toward Penn Station / GCM)
+  direction_id=0 = outbound (away from Manhattan)
+  direction_id=1 = inbound  (toward Manhattan / Penn Station)
 
 App convention:
-  "outbound" = morning commute = toward NYC  = LIRR direction_id=1
-  "inbound"  = evening commute = from NYC   = LIRR direction_id=0
+  "outbound" = morning commute = toward Penn  = LIRR direction_id=1
+  "inbound"  = evening commute = from Penn    = LIRR direction_id=0
 """
 import io
 import csv
@@ -25,10 +25,19 @@ from psycopg2.extras import RealDictCursor, execute_values
 
 DATABASE_URL = os.getenv('DATABASE_URL')
 LIRR_GTFS_URL = "http://web.mta.info/developers/data/lirr/google_transit.zip"
-REFRESH_DAYS = 3   # LIRR updates more often than NJT (new timetables several times/year)
+REFRESH_DAYS = 3
 
-# Penn Station and Grand Central Madison stop names in LIRR GTFS
-_NYC_TERMINAL_KEYWORDS = ['penn station', 'grand central', 'new york', 'atlantic terminal']
+# Branches we support: route_id → display name
+TARGET_ROUTES: Dict[str, str] = {
+    '1': 'Babylon',
+    '4': 'Ronkonkoma',
+    '9': 'Port Washington',
+}
+
+PENN_STOP_ID = '237'
+
+# Stop IDs to exclude from home-station lists (NYC terminals)
+EXCLUDE_HOME_STOPS = {'237', '349', '241'}  # Penn, Grand Central, Atlantic Terminal
 
 
 def get_connection():
@@ -40,7 +49,7 @@ def get_connection():
 # ─── Table init ────────────────────────────────────────────────────────────────
 
 def init_lirr_tables():
-    """Create LIRR GTFS tables if they don't exist."""
+    """Create LIRR GTFS tables if they don't exist, and migrate schema."""
     conn = get_connection()
     c = conn.cursor()
     try:
@@ -58,9 +67,15 @@ def init_lirr_tables():
                 route_id         TEXT,
                 service_id       TEXT,
                 trip_short_name  TEXT,
-                direction_id     INTEGER
+                direction_id     INTEGER,
+                trip_headsign    TEXT,
+                route_name       TEXT
             )
         """)
+        # Migrate: add new columns if they don't exist
+        c.execute("ALTER TABLE lirr_trips ADD COLUMN IF NOT EXISTS trip_headsign TEXT")
+        c.execute("ALTER TABLE lirr_trips ADD COLUMN IF NOT EXISTS route_name TEXT")
+
         c.execute("""
             CREATE TABLE IF NOT EXISTS lirr_stop_times (
                 trip_id        TEXT,
@@ -104,7 +119,7 @@ def init_lirr_tables():
         conn.commit()
         print("✅ LIRR DB tables ready")
     except Exception as e:
-        print(f"⚠️ LIRR table init error (may already exist): {e}")
+        print(f"⚠️ LIRR table init error: {e}")
         conn.rollback()
     finally:
         conn.close()
@@ -128,15 +143,20 @@ def _needs_refresh() -> bool:
     last = get_last_updated()
     if not last:
         return True
-    # Force re-download if lirr_stop_times is empty (fresh DB or schema migration)
     try:
         conn = get_connection()
         c = conn.cursor()
+        # Force refresh if stop_times are missing
         c.execute("SELECT COUNT(*) FROM lirr_stop_times")
-        count = c.fetchone()[0]
-        conn.close()
-        if count == 0:
+        if c.fetchone()[0] == 0:
+            conn.close()
             return True
+        # Force refresh if not all three branches are loaded
+        c.execute("SELECT COUNT(DISTINCT route_id) FROM lirr_trips")
+        if c.fetchone()[0] < len(TARGET_ROUTES):
+            conn.close()
+            return True
+        conn.close()
     except Exception:
         pass
     try:
@@ -169,77 +189,77 @@ def load_or_refresh_background():
 
 
 def _parse_and_load(zip_bytes: bytes):
-    """Parse LIRR GTFS zip and upsert Port Washington Branch data into DB."""
+    """Parse LIRR GTFS zip and upsert Babylon/Ronkonkoma/Port Washington data."""
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
 
-        # 1. Find Port Washington route_ids
-        routes_csv = zf.read('routes.txt').decode('utf-8-sig')
-        pw_route_ids = set()
-        for row in csv.DictReader(io.StringIO(routes_csv)):
-            name = (row.get('route_long_name') or row.get('route_short_name') or '').lower()
-            if 'port washington' in name:
-                pw_route_ids.add(row['route_id'])
-
-        if not pw_route_ids:
-            print("⚠️ No Port Washington route found in LIRR GTFS")
-            return
-        print(f"   Found Port Washington route(s): {pw_route_ids}")
-
-        # 2. Collect Port Washington trips
-        trips_csv = zf.read('trips.txt').decode('utf-8-sig')
-        pw_trips: Dict[str, dict] = {}
-        for row in csv.DictReader(io.StringIO(trips_csv)):
-            if row.get('route_id') in pw_route_ids:
-                pw_trips[row['trip_id']] = row
-        print(f"   Found {len(pw_trips)} Port Washington trips")
-
-        if not pw_trips:
-            print("⚠️ No trips found for Port Washington route")
-            return
-
-        # 3. Parse all stops (we filter by usage below)
+        # 1. Parse all stops
         stops_csv = zf.read('stops.txt').decode('utf-8-sig')
-        all_stops: Dict[str, dict] = {r['stop_id']: r
-                                       for r in csv.DictReader(io.StringIO(stops_csv))}
+        all_stops: Dict[str, dict] = {
+            r['stop_id']: r for r in csv.DictReader(io.StringIO(stops_csv))
+        }
 
-        # 4. Parse stop_times for Port Washington trips
+        # 2. Collect trips for all three target routes
+        trips_csv = zf.read('trips.txt').decode('utf-8-sig')
+        all_trips: Dict[str, dict] = {}
+        for row in csv.DictReader(io.StringIO(trips_csv)):
+            if row.get('route_id') in TARGET_ROUTES:
+                all_trips[row['trip_id']] = row
+        print(f"   Found {len(all_trips)} trips across routes {set(TARGET_ROUTES.keys())}")
+
+        if not all_trips:
+            print("⚠️ No trips found for target routes")
+            return
+
+        # 3. Parse stop_times for target trips
         stop_times_csv = zf.read('stop_times.txt').decode('utf-8-sig')
-        pw_stop_ids = set()
-        pw_stop_times = []
+        trip_stop_ids: Dict[str, set] = {}   # trip_id → set of stop_ids
+        all_stop_times: List[dict] = []
         for row in csv.DictReader(io.StringIO(stop_times_csv)):
-            if row['trip_id'] in pw_trips:
-                pw_stop_ids.add(row['stop_id'])
-                pw_stop_times.append(row)
+            if row['trip_id'] in all_trips:
+                if row['trip_id'] not in trip_stop_ids:
+                    trip_stop_ids[row['trip_id']] = set()
+                trip_stop_ids[row['trip_id']].add(row['stop_id'])
+                all_stop_times.append(row)
 
-        # 5. Calendar (recurring) and calendar_dates (exceptions) for affected service_ids
-        pw_service_ids = {t['service_id'] for t in pw_trips.values()}
+        # 4. Keep only Penn-serving trips (Penn stop_id must be in the trip's stops)
+        penn_trip_ids = {tid for tid, sids in trip_stop_ids.items() if PENN_STOP_ID in sids}
+        target_trips = {tid: t for tid, t in all_trips.items() if tid in penn_trip_ids}
+        target_stop_times = [st for st in all_stop_times if st['trip_id'] in target_trips]
+        target_stop_ids = {st['stop_id'] for st in target_stop_times}
 
-        # calendar.txt — recurring weekly schedule (primary for MTA LIRR)
-        pw_calendar = []
+        print(f"   Penn-serving trips: {len(target_trips)} "
+              f"({sum(1 for t in target_trips.values() if t['route_id']=='1')} Babylon, "
+              f"{sum(1 for t in target_trips.values() if t['route_id']=='4')} Ronkonkoma, "
+              f"{sum(1 for t in target_trips.values() if t['route_id']=='9')} Port Washington)")
+        print(f"   {len(target_stop_ids)} stops, {len(target_stop_times)} stop times")
+
+        # 5. Calendar data for affected service_ids
+        target_service_ids = {t['service_id'] for t in target_trips.values()}
+
+        target_calendar = []
         if 'calendar.txt' in zf.namelist():
             cal_csv = zf.read('calendar.txt').decode('utf-8-sig')
-            pw_calendar = [r for r in csv.DictReader(io.StringIO(cal_csv))
-                           if r['service_id'] in pw_service_ids]
+            target_calendar = [r for r in csv.DictReader(io.StringIO(cal_csv))
+                               if r['service_id'] in target_service_ids]
 
-        # calendar_dates.txt — exceptions (added/removed service on specific dates)
-        cal_csv = zf.read('calendar_dates.txt').decode('utf-8-sig')
-        pw_cal = [r for r in csv.DictReader(io.StringIO(cal_csv))
-                  if r['service_id'] in pw_service_ids]
+        cal_dates_csv = zf.read('calendar_dates.txt').decode('utf-8-sig')
+        target_cal_dates = [r for r in csv.DictReader(io.StringIO(cal_dates_csv))
+                            if r['service_id'] in target_service_ids]
 
-        print(f"   {len(pw_stop_ids)} stops, {len(pw_stop_times)} stop times, "
-              f"{len(pw_calendar)} calendar rows, {len(pw_cal)} calendar_dates entries")
+        print(f"   {len(target_calendar)} calendar rows, {len(target_cal_dates)} calendar_dates entries")
 
-        # 6. Upsert into DB (batch inserts for performance + reliability)
+        # 6. Upsert into DB
         conn = get_connection()
         c = conn.cursor()
         try:
             # Stops
-            stop_rows = []
-            for sid in pw_stop_ids:
-                stop = all_stops.get(sid, {})
-                stop_rows.append((sid, stop.get('stop_name'),
-                                  _to_float(stop.get('stop_lat')),
-                                  _to_float(stop.get('stop_lon'))))
+            stop_rows = [
+                (sid,
+                 all_stops.get(sid, {}).get('stop_name'),
+                 _to_float(all_stops.get(sid, {}).get('stop_lat')),
+                 _to_float(all_stops.get(sid, {}).get('stop_lon')))
+                for sid in target_stop_ids
+            ]
             execute_values(c, """
                 INSERT INTO lirr_stops (stop_id, stop_name, stop_lat, stop_lon)
                 VALUES %s
@@ -249,33 +269,46 @@ def _parse_and_load(zip_bytes: bytes):
                     stop_lon=EXCLUDED.stop_lon
             """, stop_rows)
 
-            # Trips
+            # Trips (with headsign and route_name)
             trip_rows = [
-                (tid, t['route_id'], t['service_id'],
+                (tid,
+                 t['route_id'],
+                 t['service_id'],
                  t.get('trip_short_name', ''),
-                 int(t.get('direction_id', 0) or 0))
-                for tid, t in pw_trips.items()
+                 int(t.get('direction_id', 0) or 0),
+                 t.get('trip_headsign', ''),
+                 TARGET_ROUTES.get(t['route_id'], ''))
+                for tid, t in target_trips.items()
             ]
             execute_values(c, """
-                INSERT INTO lirr_trips (trip_id, route_id, service_id, trip_short_name, direction_id)
+                INSERT INTO lirr_trips
+                  (trip_id, route_id, service_id, trip_short_name, direction_id,
+                   trip_headsign, route_name)
                 VALUES %s
                 ON CONFLICT (trip_id) DO UPDATE
                 SET route_id=EXCLUDED.route_id,
                     service_id=EXCLUDED.service_id,
                     trip_short_name=EXCLUDED.trip_short_name,
-                    direction_id=EXCLUDED.direction_id
+                    direction_id=EXCLUDED.direction_id,
+                    trip_headsign=EXCLUDED.trip_headsign,
+                    route_name=EXCLUDED.route_name
             """, trip_rows)
 
-            # Stop times — delete affected trips first, then re-insert
+            # Stop times — clear old data for these trips then re-insert
             c.execute("DELETE FROM lirr_stop_times WHERE trip_id = ANY(%s)",
-                      (list(pw_trips.keys()),))
+                      (list(target_trips.keys()),))
+            # Also clear orphaned trips from old schema (different route set)
+            c.execute("""
+                DELETE FROM lirr_stop_times
+                WHERE trip_id NOT IN (SELECT trip_id FROM lirr_trips)
+            """)
             st_rows = [
                 (st['trip_id'], st['stop_id'],
                  int(st.get('stop_sequence', 0) or 0),
                  st.get('arrival_time', ''), st.get('departure_time', ''),
                  int(st.get('pickup_type', 0) or 0),
                  int(st.get('drop_off_type', 0) or 0))
-                for st in pw_stop_times
+                for st in target_stop_times
             ]
             execute_values(c, """
                 INSERT INTO lirr_stop_times
@@ -285,19 +318,21 @@ def _parse_and_load(zip_bytes: bytes):
                 ON CONFLICT (trip_id, stop_id) DO NOTHING
             """, st_rows)
 
-            # Calendar (recurring weekly service)
+            # Calendar (recurring)
             c.execute("DELETE FROM lirr_calendar WHERE service_id = ANY(%s)",
-                      (list(pw_service_ids),))
-            if pw_calendar:
+                      (list(target_service_ids),))
+            if target_calendar:
                 cal_rows = []
-                for cal in pw_calendar:
+                for cal in target_calendar:
                     sd = datetime.strptime(cal['start_date'], '%Y%m%d').date()
                     ed = datetime.strptime(cal['end_date'], '%Y%m%d').date()
-                    cal_rows.append((cal['service_id'],
-                                     int(cal.get('monday', 0)), int(cal.get('tuesday', 0)),
-                                     int(cal.get('wednesday', 0)), int(cal.get('thursday', 0)),
-                                     int(cal.get('friday', 0)), int(cal.get('saturday', 0)),
-                                     int(cal.get('sunday', 0)), sd, ed))
+                    cal_rows.append((
+                        cal['service_id'],
+                        int(cal.get('monday', 0)), int(cal.get('tuesday', 0)),
+                        int(cal.get('wednesday', 0)), int(cal.get('thursday', 0)),
+                        int(cal.get('friday', 0)), int(cal.get('saturday', 0)),
+                        int(cal.get('sunday', 0)), sd, ed
+                    ))
                 execute_values(c, """
                     INSERT INTO lirr_calendar
                       (service_id, monday, tuesday, wednesday, thursday, friday,
@@ -313,13 +348,13 @@ def _parse_and_load(zip_bytes: bytes):
 
             # Calendar dates (exceptions)
             c.execute("DELETE FROM lirr_calendar_dates WHERE service_id = ANY(%s)",
-                      (list(pw_service_ids),))
-            if pw_cal:
+                      (list(target_service_ids),))
+            if target_cal_dates:
                 caldate_rows = [
                     (cal['service_id'],
                      datetime.strptime(cal['date'], '%Y%m%d').date(),
                      int(cal['exception_type']))
-                    for cal in pw_cal
+                    for cal in target_cal_dates
                 ]
                 execute_values(c, """
                     INSERT INTO lirr_calendar_dates (service_id, date, exception_type)
@@ -335,9 +370,8 @@ def _parse_and_load(zip_bytes: bytes):
             """, (now_str,))
 
             conn.commit()
-            print(f"✅ LIRR GTFS loaded: {len(pw_stop_ids)} stops, {len(pw_trips)} trips, "
-                  f"{len(pw_stop_times)} stop times, {len(pw_calendar)} calendar rows, "
-                  f"{len(pw_cal)} calendar_dates entries")
+            print(f"✅ LIRR GTFS loaded: {len(target_stop_ids)} stops, "
+                  f"{len(target_trips)} trips, {len(target_stop_times)} stop times")
         except Exception as e:
             print(f"❌ LIRR DB upsert failed: {e}")
             import traceback
@@ -355,52 +389,63 @@ def _to_float(v) -> Optional[float]:
         return None
 
 
-# ─── Station list ─────────────────────────────────────────────────────────────
+# ─── Station lists ─────────────────────────────────────────────────────────────
 
-def get_port_washington_stations() -> List[Dict]:
+def get_branch_stations() -> Dict[str, List[Dict]]:
     """
-    Return Port Washington Branch stops ordered by position (Penn Station first).
-    Excludes Penn Station / Grand Central — users board at suburban stops.
-    Each entry: {id: stop_id, name: stop_name}
+    Return stations grouped by branch, ordered from home end toward Penn.
+    Excludes NYC terminals (Penn, Grand Central, Atlantic Terminal).
+    Returns: {'Babylon': [{id, name}, ...], 'Ronkonkoma': [...], 'Port Washington': [...]}
     """
     conn = get_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # Pick a representative inbound trip (direction_id=1, toward Penn)
-        # and order stops by stop_sequence ascending = Penn last = home stations first
-        c.execute("""
-            SELECT DISTINCT ON (s.stop_id)
-                   s.stop_id, s.stop_name, st.stop_sequence
-            FROM lirr_stops s
-            JOIN lirr_stop_times st ON s.stop_id = st.stop_id
-            JOIN lirr_trips t ON st.trip_id = t.trip_id
-            WHERE t.direction_id = 1
-            ORDER BY s.stop_id, st.stop_sequence DESC
-        """)
-        rows = c.fetchall()
-        if not rows:
-            return []
+        result = {}
+        for route_id, branch_name in TARGET_ROUTES.items():
+            # For each branch: get stops from direction_id=1 (toward Penn) trips,
+            # order by stop_sequence DESC so branch origin (home end) comes first.
+            c.execute("""
+                SELECT DISTINCT ON (s.stop_id)
+                       s.stop_id, s.stop_name, st.stop_sequence
+                FROM lirr_stops s
+                JOIN lirr_stop_times st ON s.stop_id = st.stop_id
+                JOIN lirr_trips t ON st.trip_id = t.trip_id
+                WHERE t.route_id = %s AND t.direction_id = 1
+                ORDER BY s.stop_id, st.stop_sequence DESC
+            """, (route_id,))
+            rows = c.fetchall()
+            if not rows:
+                result[branch_name] = []
+                continue
 
-        # Deduplicate, then sort by stop_sequence descending (Port Washington first, Penn last)
-        seen: Dict[str, dict] = {}
-        for row in rows:
-            sid = row['stop_id']
-            if sid not in seen or row['stop_sequence'] > seen[sid]['stop_sequence']:
-                seen[sid] = dict(row)
+            # Deduplicate: keep max stop_sequence per stop (= most distant from Penn)
+            seen: Dict[str, dict] = {}
+            for row in rows:
+                sid = row['stop_id']
+                if sid not in seen or row['stop_sequence'] > seen[sid]['stop_sequence']:
+                    seen[sid] = dict(row)
 
-        stations = sorted(seen.values(), key=lambda x: x['stop_sequence'], reverse=True)
+            # Sort: highest stop_sequence first = branch terminus first, Penn last
+            stations = sorted(seen.values(), key=lambda x: x['stop_sequence'], reverse=True)
 
-        # Exclude NYC terminals — subscribers board at home stations
-        return [
-            {'id': s['stop_id'], 'name': s['stop_name']}
-            for s in stations
-            if not any(kw in (s['stop_name'] or '').lower() for kw in _NYC_TERMINAL_KEYWORDS)
-        ]
+            result[branch_name] = [
+                {'id': s['stop_id'], 'name': s['stop_name']}
+                for s in stations
+                if s['stop_id'] not in EXCLUDE_HOME_STOPS
+            ]
+
+        return result
     except Exception as e:
-        print(f"⚠️ get_port_washington_stations failed: {e}")
-        return []
+        print(f"⚠️ get_branch_stations failed: {e}")
+        return {}
     finally:
         conn.close()
+
+
+def get_port_washington_stations() -> List[Dict]:
+    """Legacy: return Port Washington stations as flat list."""
+    branches = get_branch_stations()
+    return branches.get('Port Washington', [])
 
 
 def get_station_name(stop_id: str) -> Optional[str]:
@@ -421,18 +466,17 @@ def get_station_name(stop_id: str) -> Optional[str]:
 def _get_service_ids_for_date(c, query_date: date) -> list:
     """
     Return active service_ids for query_date by combining calendar.txt
-    (recurring weekly schedule) and calendar_dates.txt (exceptions).
+    (recurring weekly) and calendar_dates.txt (exceptions).
     """
-    day_col = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'][query_date.weekday()]
+    day_col = ['monday', 'tuesday', 'wednesday', 'thursday',
+               'friday', 'saturday', 'sunday'][query_date.weekday()]
 
-    # 1. Recurring service active on this day of week within date range
     c.execute(f"""
         SELECT service_id FROM lirr_calendar
         WHERE {day_col} = 1 AND start_date <= %s AND end_date >= %s
     """, (query_date, query_date))
     service_ids = {r['service_id'] for r in c.fetchall()}
 
-    # 2. Apply exceptions: add exception_type=1, remove exception_type=2
     c.execute("""
         SELECT service_id, exception_type FROM lirr_calendar_dates
         WHERE date = %s
@@ -449,15 +493,11 @@ def _get_service_ids_for_date(c, query_date: date) -> list:
 def get_station_schedule(stop_id: str, query_date: date = None) -> dict:
     """
     Return outbound (morning, toward Penn) and inbound (evening, from Penn)
-    trains for a Port Washington stop on query_date.
+    trains for a given LIRR stop on query_date.
 
-    Same return format as NJTransitAPI.get_station_schedule():
+    Return format:
       {'outbound': [{id, time, destination, line}, ...],
        'inbound':  [{id, time, destination, line}, ...]}
-
-    App direction mapping:
-      outbound (to NYC, morning) = LIRR direction_id=1 trains where pickup_type=0
-      inbound  (from NYC, evening) = LIRR direction_id=0 trains where drop_off_type=0
     """
     if query_date is None:
         query_date = date.today()
@@ -466,12 +506,12 @@ def get_station_schedule(stop_id: str, query_date: date = None) -> dict:
     c = conn.cursor(cursor_factory=RealDictCursor)
     try:
         service_ids = _get_service_ids_for_date(c, query_date)
-
         if not service_ids:
             return {'outbound': [], 'inbound': []}
 
         c.execute("""
             SELECT t.trip_id, t.trip_short_name, t.direction_id,
+                   t.trip_headsign, t.route_name,
                    st.departure_time, st.arrival_time,
                    st.pickup_type, st.drop_off_type, st.stop_sequence
             FROM lirr_trips t
@@ -486,23 +526,25 @@ def get_station_schedule(stop_id: str, query_date: date = None) -> dict:
 
         for row in rows:
             train_num = row['trip_short_name'] or row['trip_id'].split('_')[-1]
-            time_str = _format_gtfs_time(row['departure_time'] or row['arrival_time'] or '',
-                                          query_date)
-            entry = {
-                'id': train_num,
-                'time': time_str,
-                'destination': '',
-                'line': 'Port Washington'
-            }
+            time_str = _format_gtfs_time(
+                row['departure_time'] or row['arrival_time'] or '', query_date)
+            line = row['route_name'] or 'LIRR'
 
             if row['direction_id'] == 1 and row['pickup_type'] == 0:
-                # Toward Penn Station — morning outbound for commuter
-                entry['destination'] = 'Penn Station NY'
-                outbound.append(entry)
+                outbound.append({
+                    'id': train_num,
+                    'time': time_str,
+                    'destination': 'Penn Station NY',
+                    'line': line,
+                })
             elif row['direction_id'] == 0 and row['drop_off_type'] == 0:
-                # Away from Penn Station — evening inbound for commuter
-                entry['destination'] = 'Port Washington'
-                inbound.append(entry)
+                dest = row['trip_headsign'] or line
+                inbound.append({
+                    'id': train_num,
+                    'time': time_str,
+                    'destination': dest,
+                    'line': line,
+                })
 
         return {'outbound': outbound, 'inbound': inbound}
 
@@ -529,7 +571,6 @@ def _format_gtfs_time(time_str: str, ref_date: date) -> str:
 def get_train_departure_today(train_number: str) -> Optional[datetime]:
     """
     Return today's scheduled first departure time for a LIRR train.
-    Used by the worker for the check-window calculation.
     Matches by trip_short_name OR last underscore-segment of trip_id.
     """
     today = date.today()
@@ -576,12 +617,14 @@ def get_status() -> dict:
         trips = c.fetchone()[0]
         c.execute("SELECT COUNT(*) FROM lirr_stop_times")
         stop_times = c.fetchone()[0]
+        c.execute("SELECT route_name, COUNT(*) FROM lirr_trips GROUP BY route_name")
+        by_branch = {row[0]: row[1] for row in c.fetchall()}
         return {
             'last_updated': get_last_updated(),
             'stops': stops,
             'trips': trips,
             'stop_times': stop_times,
-            'branch': 'Port Washington'
+            'branches': by_branch,
         }
     except Exception as e:
         return {'error': str(e)}

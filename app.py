@@ -364,10 +364,10 @@ def get_station_trains(station_code: str, schedule: str = 'weekday', hub: Option
 
 @app.get("/lirr/stations")
 def get_lirr_stations():
-    """Get Port Washington Branch stations for the LIRR subscription UI."""
+    """Get LIRR stations grouped by branch (Babylon, Ronkonkoma, Port Washington)."""
     try:
-        stations = lirr_gtfs.get_port_washington_stations()
-        return {"stations": stations, "branch": "Port Washington"}
+        branches = lirr_gtfs.get_branch_stations()
+        return {"branches": branches}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -375,7 +375,7 @@ def get_lirr_stations():
 @app.get("/lirr/trains/{stop_id}")
 def get_lirr_trains(stop_id: str, schedule: str = 'weekday'):
     """
-    Get outbound (to Penn) and inbound (from Penn) trains for a Port Washington stop.
+    Get outbound (to Penn) and inbound (from Penn) trains for a LIRR stop.
     schedule=weekday|saturday|sunday
     """
     try:
