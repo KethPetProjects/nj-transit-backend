@@ -425,8 +425,8 @@ def get_branch_stations() -> Dict[str, List[Dict]]:
                 if sid not in seen or row['stop_sequence'] > seen[sid]['stop_sequence']:
                     seen[sid] = dict(row)
 
-            # Sort: highest stop_sequence first = branch terminus first, Penn last
-            stations = sorted(seen.values(), key=lambda x: x['stop_sequence'], reverse=True)
+            # Sort: lowest stop_sequence first = branch terminus first (stop_seq=1), Penn last
+            stations = sorted(seen.values(), key=lambda x: x['stop_sequence'])
 
             result[branch_name] = [
                 {'id': s['stop_id'], 'name': s['stop_name']}
