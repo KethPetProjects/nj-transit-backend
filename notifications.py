@@ -32,27 +32,30 @@ class SMSService:
         if self.ntfy_topic:
             print(f"   🔔 ntfy.sh push notifications enabled (topic: {self.ntfy_topic})")
 
+    # ntfy priority name → numeric value
+    _NTFY_PRIORITY = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5, "max": 5}
+
     def _send_ntfy(self, title: str, message: str, priority: str = "default",
                    topic: str = None, click_url: str = None) -> None:
         """Send a push notification via ntfy.sh (best-effort, never raises).
+        Uses JSON body API so Unicode characters in titles are handled correctly.
         Uses per-subscription topic if provided, falls back to global NTFY_TOPIC env var."""
         effective_topic = topic or self.ntfy_topic
         if not effective_topic:
             return
-        headers = {
-            "Title": title,
-            "Priority": priority,
-            "Tags": "train",
+        payload = {
+            "topic": effective_topic,
+            "title": title,
+            "message": message,
+            "priority": self._NTFY_PRIORITY.get(priority, 3),
+            "tags": ["train"],
         }
         if click_url:
-            # Don't set Click — tapping the notification opens ntfy app to read the message.
-            # The Actions button lets users navigate to manage page if they want.
-            headers["Actions"] = f"view, Manage subscription, {click_url}"
+            payload["actions"] = [{"action": "view", "label": "Manage subscription", "url": click_url}]
         try:
             requests.post(
-                f"{NTFY_BASE}/{effective_topic}",
-                data=message.encode("utf-8"),
-                headers=headers,
+                NTFY_BASE,
+                json=payload,
                 timeout=5
             )
             print(f"   🔔 ntfy.sh notification sent (topic: {effective_topic})")
