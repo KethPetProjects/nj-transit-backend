@@ -74,6 +74,20 @@ def init_lirr_tables():
             )
         """)
         c.execute("""
+            CREATE TABLE IF NOT EXISTS lirr_calendar (
+                service_id  TEXT PRIMARY KEY,
+                monday      INTEGER,
+                tuesday     INTEGER,
+                wednesday   INTEGER,
+                thursday    INTEGER,
+                friday      INTEGER,
+                saturday    INTEGER,
+                sunday      INTEGER,
+                start_date  DATE,
+                end_date    DATE
+            )
+        """)
+        c.execute("""
             CREATE TABLE IF NOT EXISTS lirr_calendar_dates (
                 service_id      TEXT,
                 date            DATE,
@@ -114,6 +128,17 @@ def _needs_refresh() -> bool:
     last = get_last_updated()
     if not last:
         return True
+    # Force re-download if lirr_calendar table is empty (schema migration)
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM lirr_calendar")
+        count = c.fetchone()[0]
+        conn.close()
+        if count == 0:
+            return True
+    except Exception:
+        pass
     try:
         dt = datetime.fromisoformat(last)
         return (datetime.utcnow() - dt).days >= REFRESH_DAYS
@@ -186,13 +211,23 @@ def _parse_and_load(zip_bytes: bytes):
                 pw_stop_ids.add(row['stop_id'])
                 pw_stop_times.append(row)
 
-        # 5. Calendar dates for affected service_ids
+        # 5. Calendar (recurring) and calendar_dates (exceptions) for affected service_ids
         pw_service_ids = {t['service_id'] for t in pw_trips.values()}
+
+        # calendar.txt — recurring weekly schedule (primary for MTA LIRR)
+        pw_calendar = []
+        if 'calendar.txt' in zf.namelist():
+            cal_csv = zf.read('calendar.txt').decode('utf-8-sig')
+            pw_calendar = [r for r in csv.DictReader(io.StringIO(cal_csv))
+                           if r['service_id'] in pw_service_ids]
+
+        # calendar_dates.txt — exceptions (added/removed service on specific dates)
         cal_csv = zf.read('calendar_dates.txt').decode('utf-8-sig')
         pw_cal = [r for r in csv.DictReader(io.StringIO(cal_csv))
                   if r['service_id'] in pw_service_ids]
 
-        print(f"   {len(pw_stop_ids)} stops, {len(pw_stop_times)} stop times, {len(pw_cal)} calendar entries")
+        print(f"   {len(pw_stop_ids)} stops, {len(pw_stop_times)} stop times, "
+              f"{len(pw_calendar)} calendar rows, {len(pw_cal)} calendar_dates entries")
 
         # 6. Upsert into DB
         conn = get_connection()
@@ -241,7 +276,32 @@ def _parse_and_load(zip_bytes: bytes):
                       int(st.get('pickup_type', 0) or 0),
                       int(st.get('drop_off_type', 0) or 0)))
 
-            # Calendar dates
+            # Calendar (recurring weekly service)
+            c.execute("DELETE FROM lirr_calendar WHERE service_id = ANY(%s)",
+                      (list(pw_service_ids),))
+            for cal in pw_calendar:
+                try:
+                    sd = datetime.strptime(cal['start_date'], '%Y%m%d').date()
+                    ed = datetime.strptime(cal['end_date'], '%Y%m%d').date()
+                    c.execute("""
+                        INSERT INTO lirr_calendar
+                          (service_id, monday, tuesday, wednesday, thursday, friday, saturday, sunday, start_date, end_date)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (service_id) DO UPDATE
+                        SET monday=EXCLUDED.monday, tuesday=EXCLUDED.tuesday,
+                            wednesday=EXCLUDED.wednesday, thursday=EXCLUDED.thursday,
+                            friday=EXCLUDED.friday, saturday=EXCLUDED.saturday,
+                            sunday=EXCLUDED.sunday, start_date=EXCLUDED.start_date,
+                            end_date=EXCLUDED.end_date
+                    """, (cal['service_id'],
+                          int(cal.get('monday',0)), int(cal.get('tuesday',0)),
+                          int(cal.get('wednesday',0)), int(cal.get('thursday',0)),
+                          int(cal.get('friday',0)), int(cal.get('saturday',0)),
+                          int(cal.get('sunday',0)), sd, ed))
+                except Exception:
+                    pass
+
+            # Calendar dates (exceptions)
             c.execute("DELETE FROM lirr_calendar_dates WHERE service_id = ANY(%s)",
                       (list(pw_service_ids),))
             for cal in pw_cal:
@@ -339,6 +399,34 @@ def get_station_name(stop_id: str) -> Optional[str]:
 
 # ─── Station schedule ─────────────────────────────────────────────────────────
 
+def _get_service_ids_for_date(c, query_date: date) -> list:
+    """
+    Return active service_ids for query_date by combining calendar.txt
+    (recurring weekly schedule) and calendar_dates.txt (exceptions).
+    """
+    day_col = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'][query_date.weekday()]
+
+    # 1. Recurring service active on this day of week within date range
+    c.execute(f"""
+        SELECT service_id FROM lirr_calendar
+        WHERE {day_col} = 1 AND start_date <= %s AND end_date >= %s
+    """, (query_date, query_date))
+    service_ids = {r[0] for r in c.fetchall()}
+
+    # 2. Apply exceptions: add exception_type=1, remove exception_type=2
+    c.execute("""
+        SELECT service_id, exception_type FROM lirr_calendar_dates
+        WHERE date = %s
+    """, (query_date,))
+    for row in c.fetchall():
+        if row[1] == 1:
+            service_ids.add(row[0])
+        elif row[1] == 2:
+            service_ids.discard(row[0])
+
+    return list(service_ids)
+
+
 def get_station_schedule(stop_id: str, query_date: date = None) -> dict:
     """
     Return outbound (morning, toward Penn) and inbound (evening, from Penn)
@@ -358,12 +446,7 @@ def get_station_schedule(stop_id: str, query_date: date = None) -> dict:
     conn = get_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # Service IDs running on query_date
-        c.execute("""
-            SELECT service_id FROM lirr_calendar_dates
-            WHERE date = %s AND exception_type = 1
-        """, (query_date,))
-        service_ids = [r['service_id'] for r in c.fetchall()]
+        service_ids = _get_service_ids_for_date(c, query_date)
 
         if not service_ids:
             return {'outbound': [], 'inbound': []}
@@ -434,11 +517,7 @@ def get_train_departure_today(train_number: str) -> Optional[datetime]:
     conn = get_connection()
     c = conn.cursor()
     try:
-        c.execute("""
-            SELECT service_id FROM lirr_calendar_dates
-            WHERE date=%s AND exception_type=1
-        """, (today,))
-        service_ids = [r[0] for r in c.fetchall()]
+        service_ids = _get_service_ids_for_date(c, today)
         if not service_ids:
             return None
 
