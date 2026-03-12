@@ -21,7 +21,7 @@ from typing import Dict, List, Optional
 
 import psycopg2
 import requests
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 
 DATABASE_URL = os.getenv('DATABASE_URL')
 LIRR_GTFS_URL = "http://web.mta.info/developers/data/lirr/google_transit.zip"
@@ -229,91 +229,103 @@ def _parse_and_load(zip_bytes: bytes):
         print(f"   {len(pw_stop_ids)} stops, {len(pw_stop_times)} stop times, "
               f"{len(pw_calendar)} calendar rows, {len(pw_cal)} calendar_dates entries")
 
-        # 6. Upsert into DB
+        # 6. Upsert into DB (batch inserts for performance + reliability)
         conn = get_connection()
         c = conn.cursor()
         try:
             # Stops
+            stop_rows = []
             for sid in pw_stop_ids:
                 stop = all_stops.get(sid, {})
-                c.execute("""
-                    INSERT INTO lirr_stops (stop_id, stop_name, stop_lat, stop_lon)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (stop_id) DO UPDATE
-                    SET stop_name=EXCLUDED.stop_name,
-                        stop_lat=EXCLUDED.stop_lat,
-                        stop_lon=EXCLUDED.stop_lon
-                """, (sid, stop.get('stop_name'), _to_float(stop.get('stop_lat')),
-                      _to_float(stop.get('stop_lon'))))
+                stop_rows.append((sid, stop.get('stop_name'),
+                                  _to_float(stop.get('stop_lat')),
+                                  _to_float(stop.get('stop_lon'))))
+            execute_values(c, """
+                INSERT INTO lirr_stops (stop_id, stop_name, stop_lat, stop_lon)
+                VALUES %s
+                ON CONFLICT (stop_id) DO UPDATE
+                SET stop_name=EXCLUDED.stop_name,
+                    stop_lat=EXCLUDED.stop_lat,
+                    stop_lon=EXCLUDED.stop_lon
+            """, stop_rows)
 
             # Trips
-            for tid, t in pw_trips.items():
-                c.execute("""
-                    INSERT INTO lirr_trips (trip_id, route_id, service_id, trip_short_name, direction_id)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (trip_id) DO UPDATE
-                    SET route_id=EXCLUDED.route_id,
-                        service_id=EXCLUDED.service_id,
-                        trip_short_name=EXCLUDED.trip_short_name,
-                        direction_id=EXCLUDED.direction_id
-                """, (tid, t['route_id'], t['service_id'],
-                      t.get('trip_short_name', ''),
-                      int(t.get('direction_id', 0) or 0)))
+            trip_rows = [
+                (tid, t['route_id'], t['service_id'],
+                 t.get('trip_short_name', ''),
+                 int(t.get('direction_id', 0) or 0))
+                for tid, t in pw_trips.items()
+            ]
+            execute_values(c, """
+                INSERT INTO lirr_trips (trip_id, route_id, service_id, trip_short_name, direction_id)
+                VALUES %s
+                ON CONFLICT (trip_id) DO UPDATE
+                SET route_id=EXCLUDED.route_id,
+                    service_id=EXCLUDED.service_id,
+                    trip_short_name=EXCLUDED.trip_short_name,
+                    direction_id=EXCLUDED.direction_id
+            """, trip_rows)
 
             # Stop times — delete affected trips first, then re-insert
             c.execute("DELETE FROM lirr_stop_times WHERE trip_id = ANY(%s)",
                       (list(pw_trips.keys()),))
-            for st in pw_stop_times:
-                c.execute("""
-                    INSERT INTO lirr_stop_times
-                      (trip_id, stop_id, stop_sequence, arrival_time, departure_time,
-                       pickup_type, drop_off_type)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (trip_id, stop_id) DO NOTHING
-                """, (st['trip_id'], st['stop_id'],
-                      int(st.get('stop_sequence', 0) or 0),
-                      st.get('arrival_time', ''), st.get('departure_time', ''),
-                      int(st.get('pickup_type', 0) or 0),
-                      int(st.get('drop_off_type', 0) or 0)))
+            st_rows = [
+                (st['trip_id'], st['stop_id'],
+                 int(st.get('stop_sequence', 0) or 0),
+                 st.get('arrival_time', ''), st.get('departure_time', ''),
+                 int(st.get('pickup_type', 0) or 0),
+                 int(st.get('drop_off_type', 0) or 0))
+                for st in pw_stop_times
+            ]
+            execute_values(c, """
+                INSERT INTO lirr_stop_times
+                  (trip_id, stop_id, stop_sequence, arrival_time, departure_time,
+                   pickup_type, drop_off_type)
+                VALUES %s
+                ON CONFLICT (trip_id, stop_id) DO NOTHING
+            """, st_rows)
 
             # Calendar (recurring weekly service)
             c.execute("DELETE FROM lirr_calendar WHERE service_id = ANY(%s)",
                       (list(pw_service_ids),))
-            for cal in pw_calendar:
-                try:
+            if pw_calendar:
+                cal_rows = []
+                for cal in pw_calendar:
                     sd = datetime.strptime(cal['start_date'], '%Y%m%d').date()
                     ed = datetime.strptime(cal['end_date'], '%Y%m%d').date()
-                    c.execute("""
-                        INSERT INTO lirr_calendar
-                          (service_id, monday, tuesday, wednesday, thursday, friday, saturday, sunday, start_date, end_date)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        ON CONFLICT (service_id) DO UPDATE
-                        SET monday=EXCLUDED.monday, tuesday=EXCLUDED.tuesday,
-                            wednesday=EXCLUDED.wednesday, thursday=EXCLUDED.thursday,
-                            friday=EXCLUDED.friday, saturday=EXCLUDED.saturday,
-                            sunday=EXCLUDED.sunday, start_date=EXCLUDED.start_date,
-                            end_date=EXCLUDED.end_date
-                    """, (cal['service_id'],
-                          int(cal.get('monday',0)), int(cal.get('tuesday',0)),
-                          int(cal.get('wednesday',0)), int(cal.get('thursday',0)),
-                          int(cal.get('friday',0)), int(cal.get('saturday',0)),
-                          int(cal.get('sunday',0)), sd, ed))
-                except Exception:
-                    pass
+                    cal_rows.append((cal['service_id'],
+                                     int(cal.get('monday', 0)), int(cal.get('tuesday', 0)),
+                                     int(cal.get('wednesday', 0)), int(cal.get('thursday', 0)),
+                                     int(cal.get('friday', 0)), int(cal.get('saturday', 0)),
+                                     int(cal.get('sunday', 0)), sd, ed))
+                execute_values(c, """
+                    INSERT INTO lirr_calendar
+                      (service_id, monday, tuesday, wednesday, thursday, friday,
+                       saturday, sunday, start_date, end_date)
+                    VALUES %s
+                    ON CONFLICT (service_id) DO UPDATE
+                    SET monday=EXCLUDED.monday, tuesday=EXCLUDED.tuesday,
+                        wednesday=EXCLUDED.wednesday, thursday=EXCLUDED.thursday,
+                        friday=EXCLUDED.friday, saturday=EXCLUDED.saturday,
+                        sunday=EXCLUDED.sunday, start_date=EXCLUDED.start_date,
+                        end_date=EXCLUDED.end_date
+                """, cal_rows)
 
             # Calendar dates (exceptions)
             c.execute("DELETE FROM lirr_calendar_dates WHERE service_id = ANY(%s)",
                       (list(pw_service_ids),))
-            for cal in pw_cal:
-                try:
-                    d = datetime.strptime(cal['date'], '%Y%m%d').date()
-                    c.execute("""
-                        INSERT INTO lirr_calendar_dates (service_id, date, exception_type)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT (service_id, date) DO NOTHING
-                    """, (cal['service_id'], d, int(cal['exception_type'])))
-                except Exception:
-                    pass
+            if pw_cal:
+                caldate_rows = [
+                    (cal['service_id'],
+                     datetime.strptime(cal['date'], '%Y%m%d').date(),
+                     int(cal['exception_type']))
+                    for cal in pw_cal
+                ]
+                execute_values(c, """
+                    INSERT INTO lirr_calendar_dates (service_id, date, exception_type)
+                    VALUES %s
+                    ON CONFLICT (service_id, date) DO NOTHING
+                """, caldate_rows)
 
             # Metadata
             now_str = datetime.utcnow().isoformat()
@@ -324,7 +336,14 @@ def _parse_and_load(zip_bytes: bytes):
 
             conn.commit()
             print(f"✅ LIRR GTFS loaded: {len(pw_stop_ids)} stops, {len(pw_trips)} trips, "
-                  f"{len(pw_stop_times)} stop times")
+                  f"{len(pw_stop_times)} stop times, {len(pw_calendar)} calendar rows, "
+                  f"{len(pw_cal)} calendar_dates entries")
+        except Exception as e:
+            print(f"❌ LIRR DB upsert failed: {e}")
+            import traceback
+            traceback.print_exc()
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
