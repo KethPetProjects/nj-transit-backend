@@ -94,6 +94,18 @@ def _scheduled_departure(train_number: str) -> Optional[datetime]:
         return None
 
 
+def _train_info(train_number: str) -> dict:
+    """Look up line name and headsign for a train number."""
+    try:
+        import lirr_gtfs
+        info = lirr_gtfs.get_train_info(train_number)
+        if info:
+            return info
+    except Exception:
+        pass
+    return {'line': 'LIRR', 'headsign': '', 'direction_id': None}
+
+
 def get_train_status(train_number: str) -> Dict:
     """
     Return real-time LIRR train status.
@@ -120,6 +132,7 @@ def get_train_status(train_number: str) -> Dict:
         scheduled = _scheduled_departure(train_number)
         actual = (scheduled + timedelta(seconds=delay_sec)) if scheduled and not cancelled else scheduled
 
+        info = _train_info(train_number)
         return {
             'train_number': train_number,
             'scheduled_departure': scheduled,
@@ -129,13 +142,14 @@ def get_train_status(train_number: str) -> Dict:
             'delayed': delayed,
             'cancelled': cancelled,
             'status': 'cancelled' if cancelled else ('delayed' if delayed else 'on_time'),
-            'destination': '',
+            'destination': info.get('headsign', ''),
             'track': '',
-            'line': 'Port Washington'
+            'line': info.get('line', 'LIRR'),
         }
 
     # Not in RT feed — train has no active delay report; treat as on-time
     scheduled = _scheduled_departure(train_number)
+    info = _train_info(train_number)
     return {
         'train_number': train_number,
         'scheduled_departure': scheduled,
@@ -145,7 +159,7 @@ def get_train_status(train_number: str) -> Dict:
         'delayed': False,
         'cancelled': False,
         'status': 'on_time',
-        'destination': '',
+        'destination': info.get('headsign', ''),
         'track': '',
-        'line': 'Port Washington'
+        'line': info.get('line', 'LIRR'),
     }

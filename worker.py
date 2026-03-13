@@ -248,6 +248,20 @@ def _dep_str(scheduled) -> str:
     return f"({scheduled.strftime('%I:%M %p').lstrip('0')})"
 
 
+def _lirr_label(train_number: str, status: dict) -> str:
+    """
+    Format LIRR train for notification titles: '9:34 PM Ronkonkoma'
+    Falls back to '#1834' if time or line is unavailable.
+    """
+    sched = status.get('scheduled_departure')
+    line = status.get('line') or status.get('destination') or ''
+    if sched and line:
+        return f"{sched.strftime('%I:%M %p').lstrip('0')} {line}"
+    if sched:
+        return f"{sched.strftime('%I:%M %p').lstrip('0')} #{train_number}"
+    return f"#{train_number}"
+
+
 def _gtfs_departure(train_number: str, station: str):
     """
     Return the GTFS scheduled departure time for a train at the given station.
@@ -362,6 +376,12 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
 
         ctx = ('\n' + _format_context(context, station)) if context else ''
 
+        # Build a human-readable train label for notification titles
+        if rail_system == 'LIRR':
+            train_label = _lirr_label(train_number, status)
+        else:
+            train_label = f"Train {train_number} {_dep_str(status.get('scheduled_departure'))}"
+
         # ── Delay alert ─────────────────────────────────────────────────────
         if status['delayed'] and send_delay:
             actual = status.get('actual_departure')
@@ -371,10 +391,9 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
                 msg = f"Now departing {actual.strftime('%I:%M %p')}{loc}{ctx}"
             else:
                 msg = f"{status['delay_minutes']} min delay{loc}{ctx}"
-            sched_label = _dep_str(status.get('scheduled_departure'))
             print(f"   ⚠️  Train {train_number} delayed {status['delay_minutes']} min → Alerting {phone}")
             sms_service._send_ntfy(
-                title=f"Train {train_number} {sched_label} Delayed - {status['delay_minutes']} min",
+                title=f"{train_label} - Delayed {status['delay_minutes']} min",
                 message=msg, priority="high",
                 topic=ntfy_topic, click_url=manage_url
             )
@@ -384,10 +403,9 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
         elif status['cancelled'] and send_delay:
             loc = f" at {station_name}" if station_name else ''
             msg = f"Cancelled{loc}{ctx}"
-            sched_label = _dep_str(status.get('scheduled_departure'))
             print(f"   🚫 Train {train_number} cancelled → Alerting {phone}")
             sms_service._send_ntfy(
-                title=f"Train {train_number} {sched_label} Cancelled",
+                title=f"{train_label} - Cancelled",
                 message=msg, priority="urgent",
                 topic=ntfy_topic, click_url=manage_url
             )
@@ -416,7 +434,7 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
                 msg = f"On time — departs {dep_time}{loc}{ctx}"
                 print(f"   ✅ Train {train_number} on time → Alerting {phone}")
                 sms_service._send_ntfy(
-                    title=f"Train {train_number} {_dep_str(scheduled)} On Time",
+                    title=f"{train_label} - On Time",
                     message=msg, priority="default",
                     topic=ntfy_topic, click_url=manage_url
                 )

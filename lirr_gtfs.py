@@ -497,6 +497,25 @@ def get_station_name(stop_id: str) -> Optional[str]:
         return None
 
 
+def get_train_info(train_number: str) -> Optional[Dict]:
+    """Return line name and headsign for a LIRR train number (trip_short_name)."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute(
+            "SELECT route_name, trip_headsign, direction_id FROM lirr_trips "
+            "WHERE trip_short_name = %s LIMIT 1",
+            (train_number,)
+        )
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return {'line': row[0], 'headsign': row[1], 'direction_id': row[2]}
+    except Exception:
+        pass
+    return None
+
+
 # ─── Station schedule ─────────────────────────────────────────────────────────
 
 def _get_service_ids_for_date(c, query_date: date) -> list:
