@@ -158,6 +158,9 @@ def subscribe(request: SubscribeRequest):
         if len(morning_trains) > 3 or len(evening_trains) > 3:
             raise HTTPException(status_code=400, detail="Maximum 3 trains per direction")
 
+        rail_system = request.rail_system or 'NJT'
+        brand = "LIRR Alerts" if rail_system == 'LIRR' else "NJ Transit Alerts"
+
         # Gate changes for active subscribers behind 2FA (ntfy code)
         existing = get_subscription(phone)
         if existing and existing.get('status') == 'active':
@@ -166,7 +169,7 @@ def subscribe(request: SubscribeRequest):
             # Cache the code with a 10-minute TTL so old codes can't be replayed later
             cache_set(f"change_code_valid_{phone}", code, ttl_hours=10/60)
             sms_service._send_ntfy(
-                title="NJ Transit Alerts - Verify Change",
+                title=f"{brand} - Verify Change",
                 message=f"Your update code is {code}. Enter it in the app to confirm your train change.",
                 priority="high",
                 topic=existing['ntfy_topic']
@@ -183,7 +186,7 @@ def subscribe(request: SubscribeRequest):
             morning_trains=morning_trains,
             evening_trains=evening_trains,
             evening_hub=request.evening_hub,
-            rail_system=request.rail_system
+            rail_system=rail_system
         )
 
         ntfy_topic = result['ntfy_topic']
@@ -193,7 +196,7 @@ def subscribe(request: SubscribeRequest):
 
         if reactivated:
             sms_service._send_ntfy(
-                title="NJ Transit Alerts - Welcome back!",
+                title=f"{brand} - Welcome back!",
                 message="Your alerts are active again. Your ntfy topic is the same as before.",
                 priority="default",
                 topic=ntfy_topic,
@@ -201,7 +204,7 @@ def subscribe(request: SubscribeRequest):
             )
         elif returning:
             sms_service._send_ntfy(
-                title="NJ Transit Alerts - Trains updated!",
+                title=f"{brand} - Trains updated!",
                 message="Your train selections have been updated. Tap to view.",
                 priority="default",
                 topic=ntfy_topic,
@@ -209,7 +212,7 @@ def subscribe(request: SubscribeRequest):
             )
         else:
             sms_service._send_ntfy(
-                title="NJ Transit Alerts - You're subscribed!",
+                title=f"{brand} - You're subscribed!",
                 message="Train alerts are active. Tap to manage your subscription.",
                 priority="default",
                 topic=ntfy_topic,
