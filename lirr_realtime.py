@@ -1,11 +1,14 @@
 """
 LIRR Real-time Status via MTA GTFS-RT
-Parses MTA protobuf feed for LIRR train delays/cancellations.
+Parses MTA protobuf feed for LIRR train delays/cancellations/track.
 Returns status dicts matching NJTransitAPI.get_train_status() format
 so the worker can handle NJT and LIRR trains uniformly.
 
 Requires: gtfs-realtime-bindings==1.0.0 (already in requirements.txt)
 Env var:  MTA_API_KEY — free key from api.mta.info (optional, but recommended)
+
+Track data uses MTA's MTARR protobuf extension (gtfs_realtime_MTARR_pb2.py).
+If that module is unavailable or fails, track is silently omitted.
 """
 import os
 import requests
@@ -15,6 +18,17 @@ from typing import Dict, Optional
 MTA_LIRR_RT_URL = (
     "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/lirr%2Fgtfs-lirr"
 )
+
+PENN_STOP_ID = '237'  # Penn Station stop_id in LIRR GTFS-RT
+
+# Try loading the MTARR extension once at import time
+_mtarr_ext = None
+try:
+    import gtfs_realtime_MTARR_pb2 as _mtarr_mod
+    _mtarr_ext = _mtarr_mod.mta_railroad_stop_time_update
+    print("✅ LIRR MTARR track extension loaded")
+except Exception as _e:
+    print(f"⚠️ LIRR MTARR extension unavailable — track disabled: {_e}")
 
 # Per-cycle cache — one fetch per worker cycle (2 min), cleared by clear_cycle_cache()
 _rt_data: Optional[Dict] = None   # trip_id → {delay_sec, cancelled}
@@ -57,8 +71,9 @@ def _ensure_rt_data() -> Dict:
             # CANCELED = schedule_relationship 3
             cancelled = (tu.trip.schedule_relationship == 3)
 
-            # Max delay across all stop_time_updates
+            # Max delay + Penn Station track across all stop_time_updates
             max_delay = 0
+            track = ''
             for stu in tu.stop_time_update:
                 for field in ('departure', 'arrival'):
                     if stu.HasField(field):
@@ -66,7 +81,16 @@ def _ensure_rt_data() -> Dict:
                         if delay > max_delay:
                             max_delay = delay
 
-            result[trip_id] = {'delay_sec': max_delay, 'cancelled': cancelled}
+                # Extract track at Penn Station from MTARR extension
+                if _mtarr_ext is not None and stu.stop_id == PENN_STOP_ID:
+                    try:
+                        ext = stu.Extensions[_mtarr_ext]
+                        if ext.track:
+                            track = ext.track
+                    except Exception:
+                        pass
+
+            result[trip_id] = {'delay_sec': max_delay, 'cancelled': cancelled, 'track': track}
 
         _rt_data = result
         print(f"   🚇 LIRR RT: {len(result)} trip update(s) received")
@@ -143,7 +167,7 @@ def get_train_status(train_number: str) -> Dict:
             'cancelled': cancelled,
             'status': 'cancelled' if cancelled else ('delayed' if delayed else 'on_time'),
             'destination': info.get('headsign', ''),
-            'track': '',
+            'track': rt.get('track', ''),
             'line': info.get('line', 'LIRR'),
         }
 

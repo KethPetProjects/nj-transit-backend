@@ -347,6 +347,12 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
     for i, (train_number, status) in enumerate(statuses):
         context = statuses[i + 1:]  # remaining trains shown as backup context
 
+        # Build train label here so it's available for both track and alert notifications
+        if rail_system == 'LIRR':
+            train_label = _lirr_label(train_number, status)
+        else:
+            train_label = f"Train {train_number} {_dep_str(status.get('scheduled_departure'))}"
+
         # ── Track notification ──────────────────────────────────────────────
         # Skip entirely for cancelled trains — NJT sometimes oscillates the track
         # field on cancelled trains, which would cause repeated track+cancel loops.
@@ -362,7 +368,7 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
                 loc = f" at {station_name}" if station_name else ''
                 print(f"   🚉 Train {train_number} track {track}{loc} → Alerting {phone}")
                 sms_service._send_ntfy(
-                    title=f"Train {train_number} - Track {track}",
+                    title=f"{train_label} - Track {track}",
                     message=f"Track {track} assigned{loc}{dep_str}",
                     priority="default",
                     topic=ntfy_topic,
@@ -378,12 +384,6 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
                 continue
 
         ctx = ('\n' + _format_context(context, station)) if context else ''
-
-        # Build a human-readable train label for notification titles
-        if rail_system == 'LIRR':
-            train_label = _lirr_label(train_number, status)
-        else:
-            train_label = f"Train {train_number} {_dep_str(status.get('scheduled_departure'))}"
 
         # ── Reinstatement alert ─────────────────────────────────────────────
         # If we previously alerted cancelled but train is now running, correct it
