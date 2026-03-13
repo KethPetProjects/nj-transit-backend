@@ -27,6 +27,7 @@ COPY cache.py .
 COPY gtfs.py .
 COPY lirr_gtfs.py .
 COPY lirr_realtime.py .
+COPY gtfs_realtime_MTARR_pb2.py .
 
 # Expose port 8000 for the API
 EXPOSE 8000
