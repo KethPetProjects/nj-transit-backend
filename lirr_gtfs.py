@@ -645,9 +645,20 @@ def _format_gtfs_time(time_str: str, ref_date: date) -> str:
 
 # ─── Worker helpers ───────────────────────────────────────────────────────────
 
+def _parse_gtfs_time(time_str: str, today) -> Optional[datetime]:
+    """Parse a GTFS HH:MM:SS string (may exceed 24h) into a datetime."""
+    try:
+        parts = time_str.split(':')
+        h, m = int(parts[0]) % 24, int(parts[1])
+        return datetime.combine(today, datetime.min.time()).replace(hour=h, minute=m)
+    except Exception:
+        return None
+
+
 def get_train_departure_today(train_number: str) -> Optional[datetime]:
     """
-    Return today's scheduled first departure time for a LIRR train.
+    Return today's scheduled first departure time for a LIRR train
+    (first stop in the trip = origin station for outbound/morning trains).
     Matches by trip_short_name OR last underscore-segment of trip_id.
     """
     today = date.today()
@@ -670,12 +681,42 @@ def get_train_departure_today(train_number: str) -> Optional[datetime]:
         row = c.fetchone()
         if not row or not row[0]:
             return None
-
-        parts = row[0].split(':')
-        h, m = int(parts[0]) % 24, int(parts[1])
-        return datetime.combine(today, datetime.min.time()).replace(hour=h, minute=m)
+        return _parse_gtfs_time(row[0], today)
     except Exception as e:
         print(f"⚠️ LIRR get_train_departure_today failed for {train_number}: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_train_penn_departure_today(train_number: str) -> Optional[datetime]:
+    """
+    Return today's Penn Station departure time for an evening (inbound/outbound-from-Penn)
+    LIRR train. Mirrors the logic in get_station_schedule's inbound query.
+    """
+    today = date.today()
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        service_ids = _get_service_ids_for_date(c, today)
+        if not service_ids:
+            return None
+
+        c.execute("""
+            SELECT penn.departure_time
+            FROM lirr_trips t
+            JOIN lirr_stop_times penn ON t.trip_id = penn.trip_id
+            WHERE t.service_id = ANY(%s)
+              AND (t.trip_short_name = %s OR t.trip_id LIKE %s)
+              AND penn.stop_id = %s
+            LIMIT 1
+        """, (service_ids, train_number, f'%_{train_number}', PENN_STOP_ID))
+        row = c.fetchone()
+        if not row or not row[0]:
+            return None
+        return _parse_gtfs_time(row[0], today)
+    except Exception as e:
+        print(f"⚠️ LIRR get_train_penn_departure_today failed for {train_number}: {e}")
         return None
     finally:
         conn.close()

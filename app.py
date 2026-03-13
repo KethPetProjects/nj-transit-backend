@@ -335,11 +335,16 @@ def get_subscription_status(phone: str):
     train_labels = {}
     try:
         if rail_system == 'LIRR':
-            import lirr_gtfs
+            evening_set = set(filter(None, evening_trains))
             for t in all_trains:
                 if not t:
                     continue
-                dep = lirr_gtfs.get_train_departure_today(t)
+                # Evening trains board at Penn — show Penn departure time
+                # Morning trains board at home station — show first-stop departure
+                if t in evening_set:
+                    dep = lirr_gtfs.get_train_penn_departure_today(t)
+                else:
+                    dep = lirr_gtfs.get_train_departure_today(t)
                 info = lirr_gtfs.get_train_info(t)
                 time_part = dep.strftime('%I:%M %p').lstrip('0') if dep else ''
                 line_part = (info.get('line') or '') if info else ''
