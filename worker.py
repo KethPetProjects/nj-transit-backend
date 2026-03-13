@@ -257,7 +257,8 @@ def _lirr_label(train_number: str, status: dict) -> str:
     Falls back to '#1834' if time or line is unavailable.
     """
     sched = status.get('scheduled_departure')
-    line = status.get('line') or status.get('destination') or ''
+    # Prefer destination/headsign (e.g. "Huntington") over route name (e.g. "Port Jefferson")
+    line = status.get('destination') or status.get('line') or ''
     if sched and line:
         return f"{sched.strftime('%I:%M %p').lstrip('0')} {line}"
     if sched:
