@@ -30,6 +30,10 @@ sent_alerts = {}
 # Track last known track assignment per (phone, train) — notify on first assignment
 last_track = {}
 
+# Cancellation confirmation buffer — only alert after 2 consecutive cancelled cycles
+# Format: {f"{phone}_{train}": first_seen_datetime}
+cancel_first_seen = {}
+
 # Track service alerts already sent this session (dedup)
 sent_service_alerts = set()
 
@@ -382,6 +386,10 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
         else:
             train_label = f"Train {train_number} {_dep_str(status.get('scheduled_departure'))}"
 
+        # If no longer cancelled, clear the buffer so future cancellations re-trigger
+        if not status['cancelled']:
+            cancel_first_seen.pop(f"{phone}_{train_number}", None)
+
         # ── Delay alert ─────────────────────────────────────────────────────
         if status['delayed'] and send_delay:
             actual = status.get('actual_departure')
@@ -399,17 +407,26 @@ def check_train_group(phone: str, trains: list, send_delay: bool, send_ontime: b
             )
             sent_alerts[alert_key] = _now_et()
 
-        # ── Cancellation alert ──────────────────────────────────────────────
+        # ── Cancellation alert (buffered — require 2 consecutive cycles ~5 min) ─
         elif status['cancelled'] and send_delay:
-            loc = f" at {station_name}" if station_name else ''
-            msg = f"Cancelled{loc}{ctx}"
-            print(f"   🚫 Train {train_number} cancelled → Alerting {phone}")
-            sms_service._send_ntfy(
-                title=f"{train_label} - Cancelled",
-                message=msg, priority="urgent",
-                topic=ntfy_topic, click_url=manage_url
-            )
-            sent_alerts[alert_key] = _now_et()
+            cancel_key = f"{phone}_{train_number}"
+            now = _now_et()
+            first_seen = cancel_first_seen.get(cancel_key)
+            if first_seen is None:
+                # First time seeing this as cancelled — record it, don't alert yet
+                cancel_first_seen[cancel_key] = now
+                print(f"   🔄 Train {train_number} cancelled (cycle 1/2) — confirming next cycle")
+            elif (now - first_seen).total_seconds() >= 240:
+                # Confirmed cancelled for 2+ cycles (~4+ min) — safe to alert
+                loc = f" at {station_name}" if station_name else ''
+                msg = f"Cancelled{loc}{ctx}"
+                print(f"   🚫 Train {train_number} cancelled (confirmed) → Alerting {phone}")
+                sms_service._send_ntfy(
+                    title=f"{train_label} - Cancelled",
+                    message=msg, priority="urgent",
+                    topic=ntfy_topic, click_url=manage_url
+                )
+                sent_alerts[alert_key] = now
 
         # ── On-time alert (30-min window) ───────────────────────────────────
         elif status['on_time'] and send_ontime:
