@@ -156,6 +156,16 @@ def _needs_refresh() -> bool:
         if c.fetchone()[0] < len(TARGET_ROUTES):
             conn.close()
             return True
+        # Force refresh if today has no service coverage (GTFS schedule expired)
+        today = date.today()
+        c.execute(
+            "SELECT COUNT(*) FROM lirr_calendar_dates WHERE date = %s AND exception_type = 1",
+            (today,)
+        )
+        if c.fetchone()[0] == 0:
+            conn.close()
+            print(f"⚠️  LIRR GTFS has no service_ids for today ({today}) — forcing refresh")
+            return True
         conn.close()
     except Exception:
         pass
