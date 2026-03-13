@@ -658,12 +658,12 @@ def _parse_gtfs_time(time_str: str, today) -> Optional[datetime]:
 def get_train_departure_today(train_number: str) -> Optional[datetime]:
     """
     Return today's scheduled first departure time for a LIRR train
-    (first stop in the trip = origin station for outbound/morning trains).
+    (first stop in the trip = origin station for morning/outbound trains).
     Matches by trip_short_name OR last underscore-segment of trip_id.
     """
     today = date.today()
     conn = get_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     try:
         service_ids = _get_service_ids_for_date(c, today)
         if not service_ids:
@@ -679,9 +679,9 @@ def get_train_departure_today(train_number: str) -> Optional[datetime]:
             LIMIT 1
         """, (service_ids, train_number, f'%_{train_number}'))
         row = c.fetchone()
-        if not row or not row[0]:
+        if not row or not row['departure_time']:
             return None
-        return _parse_gtfs_time(row[0], today)
+        return _parse_gtfs_time(row['departure_time'], today)
     except Exception as e:
         print(f"⚠️ LIRR get_train_departure_today failed for {train_number}: {e}")
         return None
@@ -691,12 +691,12 @@ def get_train_departure_today(train_number: str) -> Optional[datetime]:
 
 def get_train_penn_departure_today(train_number: str) -> Optional[datetime]:
     """
-    Return today's Penn Station departure time for an evening (inbound/outbound-from-Penn)
+    Return today's Penn Station departure time for an evening (outbound-from-Penn)
     LIRR train. Mirrors the logic in get_station_schedule's inbound query.
     """
     today = date.today()
     conn = get_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     try:
         service_ids = _get_service_ids_for_date(c, today)
         if not service_ids:
@@ -712,9 +712,9 @@ def get_train_penn_departure_today(train_number: str) -> Optional[datetime]:
             LIMIT 1
         """, (service_ids, train_number, f'%_{train_number}', PENN_STOP_ID))
         row = c.fetchone()
-        if not row or not row[0]:
+        if not row or not row['departure_time']:
             return None
-        return _parse_gtfs_time(row[0], today)
+        return _parse_gtfs_time(row['departure_time'], today)
     except Exception as e:
         print(f"⚠️ LIRR get_train_penn_departure_today failed for {train_number}: {e}")
         return None
