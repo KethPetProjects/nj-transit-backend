@@ -31,13 +31,20 @@ REFRESH_DAYS = 3
 TARGET_ROUTES: Dict[str, str] = {
     '1': 'Babylon',
     '4': 'Ronkonkoma',
+    '6': 'Long Beach',
     '9': 'Port Washington',
+    '10': 'Port Jefferson',
 }
 
 PENN_STOP_ID = '237'
 
-# Stop IDs to exclude from home-station lists (NYC terminals)
-EXCLUDE_HOME_STOPS = {'237', '349', '241'}  # Penn, Grand Central, Atlantic Terminal
+# Stop IDs to exclude from home-station lists (NYC terminals + non-passenger stops)
+EXCLUDE_HOME_STOPS = {
+    '237',  # Penn Station NY
+    '349',  # Grand Central (Metro-North interchange)
+    '241',  # Atlantic Terminal
+    '86',   # Hillside Facility (maintenance, not a passenger station)
+}
 
 
 def get_connection():
@@ -403,17 +410,19 @@ def _to_float(v) -> Optional[float]:
 
 def get_branch_stations() -> Dict[str, List[Dict]]:
     """
-    Return stations grouped by branch, ordered from home end toward Penn.
-    Excludes NYC terminals (Penn, Grand Central, Atlantic Terminal).
-    Returns: {'Babylon': [{id, name}, ...], 'Ronkonkoma': [...], 'Port Washington': [...]}
+    Return stations grouped by branch, ordered from terminus toward Penn.
+    Excludes NYC terminals and non-passenger stops.
+    Each stop_id appears in exactly one branch (the one where its stop_sequence
+    is highest, i.e. furthest from Penn = most "branch-specific").
+    Returns: {'Babylon': [{id, name}, ...], 'Ronkonkoma': [...], ...}
     """
     conn = get_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        result = {}
+        # Collect all stops per branch with their max stop_sequence
+        # (max stop_sequence = closest to branch terminus, furthest from Penn)
+        branch_stop_data: Dict[str, Dict[str, dict]] = {}
         for route_id, branch_name in TARGET_ROUTES.items():
-            # For each branch: get stops from direction_id=1 (toward Penn) trips,
-            # order by stop_sequence DESC so branch origin (home end) comes first.
             c.execute("""
                 SELECT DISTINCT ON (s.stop_id)
                        s.stop_id, s.stop_name, st.stop_sequence
@@ -421,27 +430,44 @@ def get_branch_stations() -> Dict[str, List[Dict]]:
                 JOIN lirr_stop_times st ON s.stop_id = st.stop_id
                 JOIN lirr_trips t ON st.trip_id = t.trip_id
                 WHERE t.route_id = %s AND t.direction_id = 1
+                  AND s.stop_id != ALL(%s)
                 ORDER BY s.stop_id, st.stop_sequence DESC
-            """, (route_id,))
+            """, (route_id, list(EXCLUDE_HOME_STOPS)))
             rows = c.fetchall()
-            if not rows:
-                result[branch_name] = []
-                continue
 
-            # Deduplicate: keep max stop_sequence per stop (= most distant from Penn)
             seen: Dict[str, dict] = {}
             for row in rows:
                 sid = row['stop_id']
                 if sid not in seen or row['stop_sequence'] > seen[sid]['stop_sequence']:
                     seen[sid] = dict(row)
 
-            # Sort: lowest stop_sequence first = branch terminus first (stop_seq=1), Penn last
-            stations = sorted(seen.values(), key=lambda x: x['stop_sequence'])
+            branch_stop_data[branch_name] = seen
 
+        # Assign each stop_id to exactly one branch: the branch where its
+        # stop_sequence is highest (= most characteristic of that branch).
+        # On ties, earlier branch in TARGET_ROUTES iteration wins.
+        claimed: Dict[str, str] = {}  # stop_id → branch_name that claimed it
+        for branch_name, stops in branch_stop_data.items():
+            for sid, row in stops.items():
+                if sid not in claimed:
+                    claimed[sid] = branch_name
+                else:
+                    prev_branch = claimed[sid]
+                    prev_seq = branch_stop_data[prev_branch][sid]['stop_sequence']
+                    if row['stop_sequence'] > prev_seq:
+                        claimed[sid] = branch_name
+
+        # Build result: only include stops claimed by this branch
+        result = {}
+        for branch_name, stops in branch_stop_data.items():
+            branch_stations = [
+                s for s in stops.values()
+                if claimed.get(s['stop_id']) == branch_name
+            ]
+            branch_stations.sort(key=lambda x: x['stop_sequence'])
             result[branch_name] = [
                 {'id': s['stop_id'], 'name': s['stop_name']}
-                for s in stations
-                if s['stop_id'] not in EXCLUDE_HOME_STOPS
+                for s in branch_stations
             ]
 
         return result
