@@ -273,8 +273,9 @@ def subscribe_verify_change(request: SubscribeVerifyChangeRequest):
         ntfy_topic = result['ntfy_topic']
         manage_url = f"{FRONTEND_URL}/?topic={ntfy_topic}"
 
+        _brand = "LIRR Alerts" if (request.rail_system or '').upper() == 'LIRR' else "NJ Transit Alerts"
         sms_service._send_ntfy(
-            title="NJ Transit Alerts - Trains updated!",
+            title=f"{_brand} - Trains updated!",
             message="Your train selections have been updated. Tap to view.",
             priority="default",
             topic=ntfy_topic,
