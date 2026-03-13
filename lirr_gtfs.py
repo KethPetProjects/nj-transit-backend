@@ -545,42 +545,64 @@ def get_station_schedule(stop_id: str, query_date: date = None) -> dict:
         if not service_ids:
             return {'outbound': [], 'inbound': []}
 
+        # Outbound (toward Penn): show departure time at home station
         c.execute("""
-            SELECT t.trip_id, t.trip_short_name, t.direction_id,
+            SELECT t.trip_id, t.trip_short_name,
                    t.trip_headsign, t.route_name,
                    st.departure_time, st.arrival_time,
-                   st.pickup_type, st.drop_off_type, st.stop_sequence
+                   st.pickup_type
             FROM lirr_trips t
             JOIN lirr_stop_times st ON t.trip_id = st.trip_id
             WHERE t.service_id = ANY(%s) AND st.stop_id = %s
+              AND t.direction_id = 1 AND st.pickup_type = 0
             ORDER BY st.departure_time
         """, (service_ids, stop_id))
-        rows = c.fetchall()
+        outbound_rows = c.fetchall()
+
+        # Inbound (from Penn): show Penn departure time so the user knows
+        # when to catch the train at Penn, not when it arrives home
+        c.execute("""
+            SELECT t.trip_id, t.trip_short_name,
+                   t.trip_headsign, t.route_name,
+                   penn.departure_time AS penn_dep, penn.arrival_time AS penn_arr
+            FROM lirr_trips t
+            JOIN lirr_stop_times home_st ON t.trip_id = home_st.trip_id
+            JOIN lirr_stop_times penn    ON t.trip_id = penn.trip_id
+            WHERE t.service_id = ANY(%s)
+              AND home_st.stop_id = %s AND t.direction_id = 0
+              AND home_st.drop_off_type = 0
+              AND penn.stop_id = %s
+            ORDER BY penn.departure_time
+        """, (service_ids, stop_id, PENN_STOP_ID))
+        inbound_rows = c.fetchall()
 
         outbound = []
         inbound = []
 
-        for row in rows:
+        for row in outbound_rows:
             train_num = row['trip_short_name'] or row['trip_id'].split('_')[-1]
             time_str = _format_gtfs_time(
                 row['departure_time'] or row['arrival_time'] or '', query_date)
             line = row['route_name'] or 'LIRR'
+            outbound.append({
+                'id': train_num,
+                'time': time_str,
+                'destination': 'Penn Station NY',
+                'line': line,
+            })
 
-            if row['direction_id'] == 1 and row['pickup_type'] == 0:
-                outbound.append({
-                    'id': train_num,
-                    'time': time_str,
-                    'destination': 'Penn Station NY',
-                    'line': line,
-                })
-            elif row['direction_id'] == 0 and row['drop_off_type'] == 0:
-                dest = row['trip_headsign'] or line
-                inbound.append({
-                    'id': train_num,
-                    'time': time_str,
-                    'destination': dest,
-                    'line': line,
-                })
+        for row in inbound_rows:
+            train_num = row['trip_short_name'] or row['trip_id'].split('_')[-1]
+            time_str = _format_gtfs_time(
+                row['penn_dep'] or row['penn_arr'] or '', query_date)
+            line = row['route_name'] or 'LIRR'
+            dest = row['trip_headsign'] or line
+            inbound.append({
+                'id': train_num,
+                'time': time_str,
+                'destination': dest,
+                'line': line,
+            })
 
         return {'outbound': outbound, 'inbound': inbound}
 
