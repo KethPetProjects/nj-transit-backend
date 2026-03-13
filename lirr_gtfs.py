@@ -722,6 +722,40 @@ def get_train_penn_departure_today(train_number: str) -> Optional[datetime]:
         conn.close()
 
 
+def get_train_departure_at_stop(train_number: str, stop_id: str) -> Optional[datetime]:
+    """
+    Return today's departure time for a LIRR train at a specific stop.
+    Used for morning train labels — shows departure at the user's boarding station,
+    not the train's origin (which may be earlier and at a different station).
+    """
+    today = date.today()
+    conn = get_connection()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        service_ids = _get_service_ids_for_date(c, today)
+        if not service_ids:
+            return None
+
+        c.execute("""
+            SELECT st.departure_time
+            FROM lirr_trips t
+            JOIN lirr_stop_times st ON t.trip_id = st.trip_id
+            WHERE t.service_id = ANY(%s)
+              AND (t.trip_short_name = %s OR t.trip_id LIKE %s)
+              AND st.stop_id = %s
+            LIMIT 1
+        """, (service_ids, train_number, f'%_{train_number}', stop_id))
+        row = c.fetchone()
+        if not row or not row['departure_time']:
+            return None
+        return _parse_gtfs_time(row['departure_time'], today)
+    except Exception as e:
+        print(f"⚠️ LIRR get_train_departure_at_stop failed for {train_number} at {stop_id}: {e}")
+        return None
+    finally:
+        conn.close()
+
+
 # ─── Admin status ─────────────────────────────────────────────────────────────
 
 def get_status() -> dict:

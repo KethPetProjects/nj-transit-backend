@@ -336,13 +336,18 @@ def get_subscription_status(phone: str):
     try:
         if rail_system == 'LIRR':
             evening_set = set(filter(None, evening_trains))
+            lirr_station = sub.get('station') or ''
             for t in all_trains:
                 if not t:
                     continue
                 # Evening trains board at Penn — show Penn departure time
-                # Morning trains board at home station — show first-stop departure
+                # Morning trains board at home station — show departure at their stop
                 if t in evening_set:
                     dep = lirr_gtfs.get_train_penn_departure_today(t)
+                elif lirr_station:
+                    dep = lirr_gtfs.get_train_departure_at_stop(t, lirr_station)
+                    if not dep:
+                        dep = lirr_gtfs.get_train_departure_today(t)  # fallback to first stop
                 else:
                     dep = lirr_gtfs.get_train_departure_today(t)
                 info = lirr_gtfs.get_train_info(t)
