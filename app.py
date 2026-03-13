@@ -323,11 +323,46 @@ def verify(request: VerifyRequest):
 def get_subscription_status(phone: str):
     """Get subscription status for a phone number"""
     sub = get_subscription(phone)
-    
-    if sub:
-        return sub
-    else:
+    if not sub:
         raise HTTPException(status_code=404, detail="Subscription not found")
+
+    # Enrich with human-readable train labels: {train_number: "9:34 PM Ronkonkoma"}
+    rail_system = (sub.get('rail_system') or 'NJT').upper()
+    morning_trains = sub.get('morning_trains') or ([sub['morning_train']] if sub.get('morning_train') else [])
+    evening_trains = sub.get('evening_trains') or ([sub['evening_train']] if sub.get('evening_train') else [])
+    all_trains = list(dict.fromkeys(morning_trains + evening_trains))  # dedup, preserve order
+
+    train_labels = {}
+    try:
+        if rail_system == 'LIRR':
+            import lirr_gtfs
+            for t in all_trains:
+                if not t:
+                    continue
+                dep = lirr_gtfs.get_train_departure_today(t)
+                info = lirr_gtfs.get_train_info(t)
+                time_part = dep.strftime('%I:%M %p').lstrip('0') if dep else ''
+                line_part = (info.get('line') or '') if info else ''
+                label = f"{time_part} {line_part}".strip()
+                if label:
+                    train_labels[t] = label
+        else:
+            import gtfs as _gtfs
+            station = sub.get('station') or ''
+            for t in all_trains:
+                if not t:
+                    continue
+                dep = _gtfs.get_train_departure_at_station(t, station) if station else None
+                if not dep:
+                    origin = _gtfs.get_train_origin_njt_code(t)
+                    dep = _gtfs.get_train_departure_at_station(t, origin) if origin else None
+                if dep:
+                    train_labels[t] = dep.strftime('%I:%M %p').lstrip('0')
+    except Exception:
+        pass
+
+    sub['train_labels'] = train_labels
+    return sub
 
 
 @app.get("/trains")
