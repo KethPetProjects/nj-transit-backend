@@ -337,19 +337,21 @@ def get_subscription_status(phone: str):
         if rail_system == 'LIRR':
             evening_set = set(filter(None, evening_trains))
             lirr_station = sub.get('station') or ''
+            # Use a weekday reference date so labels work even on weekends/holidays
+            ref = lirr_gtfs.next_weekday_date()
             for t in all_trains:
                 if not t:
                     continue
                 # Evening trains board at Penn — show Penn departure time
                 # Morning trains board at home station — show departure at their stop
                 if t in evening_set:
-                    dep = lirr_gtfs.get_train_penn_departure_today(t)
+                    dep = lirr_gtfs.get_train_penn_departure_on_date(t, ref)
                 elif lirr_station:
-                    dep = lirr_gtfs.get_train_departure_at_stop(t, lirr_station)
+                    dep = lirr_gtfs.get_train_departure_at_stop_on_date(t, lirr_station, ref)
                     if not dep:
-                        dep = lirr_gtfs.get_train_departure_today(t)  # fallback to first stop
+                        dep = lirr_gtfs.get_train_departure_on_date(t, ref)  # fallback to first stop
                 else:
-                    dep = lirr_gtfs.get_train_departure_today(t)
+                    dep = lirr_gtfs.get_train_departure_on_date(t, ref)
                 info = lirr_gtfs.get_train_info(t)
                 time_part = dep.strftime('%I:%M %p').lstrip('0') if dep else ''
                 # Evening: show destination (headsign) e.g. "Huntington" not "Port Jefferson"

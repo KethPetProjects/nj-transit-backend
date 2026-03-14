@@ -756,6 +756,98 @@ def get_train_departure_at_stop(train_number: str, stop_id: str) -> Optional[dat
         conn.close()
 
 
+def next_weekday_date() -> date:
+    """Return today if Mon–Fri, else next Monday. Use for stable label lookups."""
+    d = date.today()
+    if d.weekday() >= 5:          # 5=Saturday, 6=Sunday
+        d += timedelta(days=7 - d.weekday())
+    return d
+
+
+def get_train_departure_on_date(train_number: str, ref_date: date) -> Optional[datetime]:
+    """Return scheduled first departure for a train on a specific date."""
+    conn = get_connection()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        service_ids = _get_service_ids_for_date(c, ref_date)
+        if not service_ids:
+            return None
+        c.execute("""
+            SELECT st.departure_time
+            FROM lirr_trips t
+            JOIN lirr_stop_times st ON t.trip_id = st.trip_id
+            WHERE t.service_id = ANY(%s)
+              AND (t.trip_short_name = %s OR t.trip_id LIKE %s)
+            ORDER BY st.stop_sequence ASC
+            LIMIT 1
+        """, (service_ids, train_number, f'%_{train_number}'))
+        row = c.fetchone()
+        if not row or not row['departure_time']:
+            return None
+        return _parse_gtfs_time(row['departure_time'], ref_date)
+    except Exception as e:
+        print(f"⚠️ LIRR get_train_departure_on_date failed for {train_number}: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_train_penn_departure_on_date(train_number: str, ref_date: date) -> Optional[datetime]:
+    """Return Penn Station departure for a train on a specific date."""
+    conn = get_connection()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        service_ids = _get_service_ids_for_date(c, ref_date)
+        if not service_ids:
+            return None
+        c.execute("""
+            SELECT penn.departure_time
+            FROM lirr_trips t
+            JOIN lirr_stop_times penn ON t.trip_id = penn.trip_id
+            WHERE t.service_id = ANY(%s)
+              AND (t.trip_short_name = %s OR t.trip_id LIKE %s)
+              AND penn.stop_id = %s
+            LIMIT 1
+        """, (service_ids, train_number, f'%_{train_number}', PENN_STOP_ID))
+        row = c.fetchone()
+        if not row or not row['departure_time']:
+            return None
+        return _parse_gtfs_time(row['departure_time'], ref_date)
+    except Exception as e:
+        print(f"⚠️ LIRR get_train_penn_departure_on_date failed for {train_number}: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_train_departure_at_stop_on_date(train_number: str, stop_id: str, ref_date: date) -> Optional[datetime]:
+    """Return departure at a specific stop for a train on a specific date."""
+    conn = get_connection()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        service_ids = _get_service_ids_for_date(c, ref_date)
+        if not service_ids:
+            return None
+        c.execute("""
+            SELECT st.departure_time
+            FROM lirr_trips t
+            JOIN lirr_stop_times st ON t.trip_id = st.trip_id
+            WHERE t.service_id = ANY(%s)
+              AND (t.trip_short_name = %s OR t.trip_id LIKE %s)
+              AND st.stop_id = %s
+            LIMIT 1
+        """, (service_ids, train_number, f'%_{train_number}', stop_id))
+        row = c.fetchone()
+        if not row or not row['departure_time']:
+            return None
+        return _parse_gtfs_time(row['departure_time'], ref_date)
+    except Exception as e:
+        print(f"⚠️ LIRR get_train_departure_at_stop_on_date failed for {train_number} at {stop_id}: {e}")
+        return None
+    finally:
+        conn.close()
+
+
 # ─── Admin status ─────────────────────────────────────────────────────────────
 
 def get_status() -> dict:
