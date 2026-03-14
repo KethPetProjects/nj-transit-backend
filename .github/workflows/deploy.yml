@@ -8,16 +8,20 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      packages: write   # needed to push to GHCR
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Log in to Azure Container Registry
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: kethnjtransitalerts-g3ddh7gmbzf3dxd3.azurecr.io
-          username: ${{ secrets.ACR_USERNAME }}
-          password: ${{ secrets.ACR_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -26,8 +30,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            kethnjtransitalerts-g3ddh7gmbzf3dxd3.azurecr.io/nj-transit-backend:latest
-            kethnjtransitalerts-g3ddh7gmbzf3dxd3.azurecr.io/nj-transit-backend:${{ github.sha }}
+            ghcr.io/kethpetprojects/nj-transit-backend:latest
+            ghcr.io/kethpetprojects/nj-transit-backend:${{ github.sha }}
 
       - name: Log in to Azure
         uses: azure/login@v1
@@ -39,4 +43,4 @@ jobs:
           az containerapp update \
             --name train-alerts-api \
             --resource-group train-alerts-rg \
-            --image kethnjtransitalerts-g3ddh7gmbzf3dxd3.azurecr.io/nj-transit-backend:${{ github.sha }}
+            --image ghcr.io/kethpetprojects/nj-transit-backend:${{ github.sha }}
