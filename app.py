@@ -382,6 +382,12 @@ def get_subscription_status(phone: str):
     return sub
 
 
+@app.get("/stations")
+def get_stations():
+    """Get all NJT stations with their codes and names, sorted alphabetically."""
+    return {"stations": gtfs.get_all_stations()}
+
+
 @app.get("/trains")
 def get_trains():
     """Get list of available trains"""

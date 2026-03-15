@@ -850,6 +850,25 @@ def get_station_name(njt_code: str) -> Optional[str]:
         return None
 
 
+def get_all_stations() -> list:
+    """Return all NJT stations as a list of {code, name} sorted by name."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('''
+            SELECT DISTINCT njt_code, stop_name
+            FROM gtfs_stops
+            WHERE njt_code IS NOT NULL AND stop_name IS NOT NULL
+            ORDER BY stop_name ASC
+        ''')
+        rows = c.fetchall()
+        conn.close()
+        return [{"code": row[0], "name": row[1]} for row in rows]
+    except Exception as e:
+        print(f"⚠️ get_all_stations failed: {e}")
+        return []
+
+
 def get_train_departure_at_station(train_number: str, station_code: str,
                                    query_date: Optional[date] = None) -> Optional[datetime]:
     """
