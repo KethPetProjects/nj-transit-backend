@@ -850,6 +850,24 @@ def get_station_name(njt_code: str) -> Optional[str]:
         return None
 
 
+def get_all_lines() -> list:
+    """Return all NJT rail lines as a list of {id, short_name, long_name} sorted by id."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('''
+            SELECT route_id, route_short_name, route_long_name
+            FROM gtfs_routes
+            ORDER BY route_id ASC
+        ''')
+        rows = c.fetchall()
+        conn.close()
+        return [{"id": row[0], "short_name": row[1], "long_name": row[2]} for row in rows]
+    except Exception as e:
+        print(f"⚠️ get_all_lines failed: {e}")
+        return []
+
+
 def get_all_stations() -> list:
     """Return all NJT stations as a list of {code, name} sorted by name."""
     try:

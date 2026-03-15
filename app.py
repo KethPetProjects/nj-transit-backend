@@ -388,6 +388,12 @@ def get_stations():
     return {"stations": gtfs.get_all_stations()}
 
 
+@app.get("/lines")
+def get_lines():
+    """Get all NJT rail lines with their route IDs and names."""
+    return {"lines": gtfs.get_all_lines()}
+
+
 @app.get("/trains")
 def get_trains():
     """Get list of available trains"""
