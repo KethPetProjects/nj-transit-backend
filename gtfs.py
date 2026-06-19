@@ -17,6 +17,23 @@ import os
 DATABASE_URL = os.getenv('DATABASE_URL')
 GTFS_URL = "https://www.njtransit.com/rail_data.zip"
 REFRESH_INTERVAL_DAYS = 2  # NJT license requires downloading new data within 3 business days
+NTFY_TOPIC = os.getenv('NTFY_TOPIC')
+NTFY_BASE = "https://ntfy.sh"
+
+
+def _alert(title: str, message: str, priority: str = "high"):
+    """Send an ntfy push notification for operational failures (best-effort)."""
+    if not NTFY_TOPIC:
+        return
+    try:
+        requests.post(
+            NTFY_BASE,
+            headers={"Title": title, "Priority": priority, "Topic": NTFY_TOPIC},
+            data=message.encode(),
+            timeout=10,
+        )
+    except Exception:
+        pass
 
 # NYC-area destinations — trains headed here are "outbound" (commuter direction toward NYC)
 NYC_DESTINATIONS = [
@@ -196,6 +213,7 @@ def download_and_load():
         print(f"✅ Downloaded {mb:.1f} MB")
     except Exception as e:
         print(f"❌ GTFS download failed: {e}")
+        _alert("⚠️ GTFS Download Failed", f"Could not download NJT schedule from {GTFS_URL}\n\nError: {e}")
         raise
 
     zip_data = io.BytesIO(response.content)
@@ -638,6 +656,11 @@ def load_or_refresh():
                 print("✅ All GTFS data is current")
     except Exception as e:
         print(f"❌ GTFS load_or_refresh failed: {e}")
+        _alert(
+            "⚠️ GTFS Refresh Failed",
+            f"Schedule data could not be updated — train times may be wrong.\n\nError: {e}",
+            priority="urgent",
+        )
 
 
 def load_or_refresh_background():
