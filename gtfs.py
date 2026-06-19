@@ -85,7 +85,7 @@ def init_gtfs_tables():
                 departure_time TEXT,
                 pickup_type INTEGER,
                 drop_off_type INTEGER,
-                PRIMARY KEY (trip_id, stop_id)
+                PRIMARY KEY (trip_id, stop_sequence)
             )
         ''')
         c.execute('''
@@ -109,6 +109,30 @@ def init_gtfs_tables():
         c.execute('CREATE INDEX IF NOT EXISTS idx_gtfs_trips_service ON gtfs_trips (service_id)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_stop ON gtfs_stop_times (stop_id)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_gtfs_calendar_date ON gtfs_calendar_dates (date, exception_type)')
+
+        # Migration: fix PK from (trip_id, stop_id) → (trip_id, stop_sequence)
+        # NJT GTFS now includes trains that stop at the same station twice,
+        # making (trip_id, stop_id) non-unique. stop_sequence is the correct PK.
+        c.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'gtfs_stop_times_pkey'
+                      AND contype = 'p'
+                ) THEN
+                    -- Check if the PK is still on (trip_id, stop_id)
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint c
+                        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+                        WHERE c.conname = 'gtfs_stop_times_pkey' AND a.attname = 'stop_id'
+                    ) THEN
+                        ALTER TABLE gtfs_stop_times DROP CONSTRAINT gtfs_stop_times_pkey;
+                        ALTER TABLE gtfs_stop_times ADD PRIMARY KEY (trip_id, stop_sequence);
+                    END IF;
+                END IF;
+            END $$;
+        """)
 
         conn.commit()
         print("✅ GTFS tables initialized")
@@ -331,8 +355,8 @@ def _load_stop_times(zf: zipfile.ZipFile):
                         (trip_id, stop_id, stop_sequence, arrival_time,
                          departure_time, pickup_type, drop_off_type)
                     VALUES %s
-                    ON CONFLICT (trip_id, stop_id) DO UPDATE SET
-                        stop_sequence  = EXCLUDED.stop_sequence,
+                    ON CONFLICT (trip_id, stop_sequence) DO UPDATE SET
+                        stop_id        = EXCLUDED.stop_id,
                         arrival_time   = EXCLUDED.arrival_time,
                         departure_time = EXCLUDED.departure_time,
                         pickup_type    = EXCLUDED.pickup_type,
@@ -349,8 +373,8 @@ def _load_stop_times(zf: zipfile.ZipFile):
                 (trip_id, stop_id, stop_sequence, arrival_time,
                  departure_time, pickup_type, drop_off_type)
             VALUES %s
-            ON CONFLICT (trip_id, stop_id) DO UPDATE SET
-                stop_sequence  = EXCLUDED.stop_sequence,
+            ON CONFLICT (trip_id, stop_sequence) DO UPDATE SET
+                stop_id        = EXCLUDED.stop_id,
                 arrival_time   = EXCLUDED.arrival_time,
                 departure_time = EXCLUDED.departure_time,
                 pickup_type    = EXCLUDED.pickup_type,
