@@ -43,11 +43,42 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
+def _check_schedule_changes():
+    """Check all subscribers' trains against current GTFS and alert those with missing trains."""
+    subscriptions = get_active_subscriptions()
+    notified = 0
+    for sub in subscriptions:
+        ntfy_topic = sub.get('ntfy_topic')
+        morning_trains = sub.get('morning_trains') or ([sub['morning_train']] if sub.get('morning_train') else [])
+        evening_trains = sub.get('evening_trains') or ([sub['evening_train']] if sub.get('evening_train') else [])
+        all_trains = [t for t in morning_trains + evening_trains if t]
+        if not all_trains or not ntfy_topic:
+            continue
+        missing = gtfs.check_trains_in_schedule(all_trains)
+        if missing:
+            missing_str = ', '.join(sorted(missing))
+            manage_url = f"{FRONTEND_URL}/?topic={ntfy_topic}"
+            sms_service._send_ntfy(
+                title="NJ Transit Schedule Updated",
+                message=(
+                    f"NJT just updated their schedule. "
+                    f"Train(s) {missing_str} may have changed or been renumbered. "
+                    f"Tap to review and update your train selections."
+                ),
+                priority="high",
+                topic=ntfy_topic,
+                click_url=manage_url,
+            )
+            notified += 1
+            print(f"📢 Schedule change alert sent — missing trains: {missing_str}")
+    print(f"✅ Schedule change check complete: {notified} subscriber(s) alerted")
+
+
 @app.on_event("startup")
 def on_startup():
     """On startup: kick off GTFS data load in the background (non-blocking)."""
     print("🚀 App startup — triggering GTFS load in background thread...")
-    gtfs.load_or_refresh_background()
+    gtfs.load_or_refresh_background(on_success=_check_schedule_changes)
     lirr_gtfs.load_or_refresh_background()
     # Initialize feature flags with defaults on first run
     if cache_get('lirr_enabled') is None:
@@ -718,65 +749,15 @@ def admin_gtfs_status(username: str = Depends(verify_admin)):
 @app.get("/admin/gtfs/refresh")
 def admin_gtfs_refresh(username: str = Depends(verify_admin)):
     """Admin: Force a full re-download of GTFS data (runs in background)."""
-    gtfs.load_or_refresh_background()
+    gtfs.load_or_refresh_background(on_success=_check_schedule_changes)
     return {"status": "refresh_started", "message": "GTFS refresh triggered in background — check logs for progress"}
 
 
 @app.get("/admin/notify-schedule-change")
 def admin_notify_schedule_change(username: str = Depends(verify_admin)):
-    """
-    Admin: Check all subscribers' saved train numbers against the current GTFS schedule.
-    Sends a targeted ntfy notification only to subscribers whose trains are missing
-    from the next 14 days of the schedule, prompting them to review and update.
-    Run this after a GTFS refresh when NJT publishes a new seasonal timetable.
-    """
-    subscriptions = get_active_subscriptions()
-    notified = []
-    all_ok = []
-    skipped_no_topic = []
-
-    for sub in subscriptions:
-        ntfy_topic = sub.get('ntfy_topic')
-        morning_trains = sub.get('morning_trains') or ([sub['morning_train']] if sub.get('morning_train') else [])
-        evening_trains = sub.get('evening_trains') or ([sub['evening_train']] if sub.get('evening_train') else [])
-        all_trains = [t for t in morning_trains + evening_trains if t]
-
-        if not all_trains:
-            continue
-
-        missing = gtfs.check_trains_in_schedule(all_trains)
-
-        if missing:
-            if not ntfy_topic:
-                skipped_no_topic.append({'trains': sorted(missing)})
-                continue
-
-            manage_url = f"{FRONTEND_URL}/?topic={ntfy_topic}"
-            missing_str = ', '.join(sorted(missing))
-            sms_service._send_ntfy(
-                title="NJ Transit Schedule Updated",
-                message=(
-                    f"NJT just updated their schedule. "
-                    f"Train(s) {missing_str} may have changed or been renumbered. "
-                    f"Tap to review and update your train selections."
-                ),
-                priority="high",
-                topic=ntfy_topic,
-                click_url=manage_url
-            )
-            notified.append({'missing_trains': sorted(missing)})
-            print(f"📢 Schedule change alert sent — missing trains: {missing_str}")
-        else:
-            all_ok.append(True)
-
-    print(f"✅ Schedule change check complete: {len(notified)} notified, {len(all_ok)} OK, {len(skipped_no_topic)} skipped (no ntfy topic)")
-    return {
-        "total_checked": len(subscriptions),
-        "notified": len(notified),
-        "all_trains_ok": len(all_ok),
-        "skipped_no_topic": len(skipped_no_topic),
-        "message": f"Sent alerts to {len(notified)} subscriber(s) with outdated train numbers."
-    }
+    """Admin: Manually trigger schedule-change check (also runs automatically after every GTFS refresh)."""
+    _check_schedule_changes()
+    return {"status": "done", "message": "Schedule change check complete — see logs for details."}
 
 
 # ========== SERVICE ALERTS FEATURE FLAG ==========

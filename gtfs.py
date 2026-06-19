@@ -200,10 +200,11 @@ def _set_last_updated():
 # Download + Parse
 # ---------------------------------------------------------------------------
 
-def download_and_load():
+def download_and_load(on_success=None):
     """
     Download rail_data.zip from NJ Transit, parse each GTFS file, and
     upsert into PostgreSQL.  Can take 30-90 seconds on first run.
+    on_success: optional callable invoked after a successful load (e.g. schedule-change check).
     """
     print(f"📥 Downloading GTFS data from {GTFS_URL} ...")
     try:
@@ -254,6 +255,11 @@ def download_and_load():
 
     _set_last_updated()
     print("✅ GTFS data fully loaded!")
+    if on_success:
+        try:
+            on_success()
+        except Exception as e:
+            print(f"⚠️ GTFS on_success callback failed: {e}")
 
 
 def _load_stops(zf: zipfile.ZipFile):
@@ -624,29 +630,30 @@ def _block_ids_loaded() -> bool:
         return False
 
 
-def load_or_refresh():
+def load_or_refresh(on_success=None):
     """
     Check whether GTFS data is missing or stale and refresh if needed.
     Also runs the NJT station-code mapping if it hasn't been done yet
     (e.g. after a schema upgrade that added the njt_code column).
     Called on app startup in a background thread (non-blocking).
+    on_success: passed through to download_and_load (e.g. schedule-change check).
     """
     try:
         last_updated = get_last_updated()
         if last_updated is None:
             print("🔄 No GTFS data in DB — performing initial load...")
-            download_and_load()
+            download_and_load(on_success=on_success)
         elif datetime.now() - last_updated > timedelta(days=REFRESH_INTERVAL_DAYS):
             age = (datetime.now() - last_updated).days
             print(f"🔄 GTFS data is {age} day(s) old — refreshing...")
-            download_and_load()
+            download_and_load(on_success=on_success)
         else:
             age_h = (datetime.now() - last_updated).total_seconds() / 3600
             print(f"✅ GTFS data is current (last updated {age_h:.1f} hours ago)")
             # Check if block_id is missing from trips (schema upgrade)
             if not _block_ids_loaded():
                 print("🔄 block_id missing from trips — forcing full GTFS reload...")
-                download_and_load()
+                download_and_load(on_success=on_success)
             else:
                 # Always re-run station code mapping on startup — it's fast
                 # (one API call) and self-heals any missed stations from previous
@@ -663,9 +670,9 @@ def load_or_refresh():
         )
 
 
-def load_or_refresh_background():
+def load_or_refresh_background(on_success=None):
     """Start load_or_refresh in a daemon thread so it doesn't block API startup."""
-    t = threading.Thread(target=load_or_refresh, daemon=True, name="gtfs-loader")
+    t = threading.Thread(target=load_or_refresh, kwargs={"on_success": on_success}, daemon=True, name="gtfs-loader")
     t.start()
     return t
 
